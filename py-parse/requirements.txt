@@ -1,0 +1,11 @@
+# gRPC
+grpcio>=1.60
+grpcio-tools>=1.60
+protobuf>=4.25
+
+# Document parsing
+PyMuPDF>=1.24
+
+# Storage adapters (install only what you use)
+minio>=7.2
+boto3>=1.34

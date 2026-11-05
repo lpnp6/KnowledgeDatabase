@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package parse.v1;
+
+// py-parser's external service contract (gRPC server-streaming).
+//
+// Design points:
+//   - server-streaming: chunks are pushed one at a time, no giant response in memory.
+//   - `source` is a uniform URI; the scheme selects the storage backend, the
+//     remainder is the location within that backend.
+//   - The request carries only *location* (doc_id + source). Connection config
+//     (endpoints / credentials) lives in the config center, never in the request.
+service ParseService {
+  // Parse a document, streaming chunks one by one, then a final `done` summary.
+  rpc Parse(ParseRequest) returns (stream ParseResponse);
+}
+
+message ParseRequest {
+  // Logical identity of the document (business key, storage-agnostic; used for
+  // provenance, status tracking, and chunk-id prefixing).
+  string doc_id = 1;
+  // Uniform resource URI: file:///... | minio://... | s3://... | oss://...
+  string source = 2;
+}
+
+// Two message kinds in the stream: many chunks, then one summary.
+message ParseResponse {
+  oneof payload {
+    ParseChunk chunk = 1;   // pushed repeatedly
+    ParseResult done = 2;   // sent once at end of stream
+  }
+}
+
+message ParseChunk {
+  string chunk_id = 1;
+  string text = 2;
+  ChunkMetadata metadata = 3;
+}
+
+message ChunkMetadata {
+  int32 page = 1;
+  string heading = 2;
+  int32 heading_level = 3;
+}
+
+message ParseResult {
+  int32 chunk_count = 1;
+  DocMeta doc_meta = 2;
+}
+
+message DocMeta {
+  int32 total_pages = 1;
+  string title = 2;
+  string warning = 3;
+}
