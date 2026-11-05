@@ -11,9 +11,11 @@ Single-pass report to eyeball two quality points:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,9 +39,12 @@ def analyze(analyzer, pdf_path: str, dpi: int, max_pages: int):
         img = pix.tobytes("png")
         t0 = time.time()
         page_elems = analyzer.analyze(img, i)
-        timings.append(time.time() - t0)
+        dt = time.time() - t0
+        timings.append(dt)
         page_elems.sort(key=lambda e: (e.bbox[1], e.bbox[0]))  # top-to-bottom
         elements.extend(page_elems)
+        # per-page progress (flush so it prints even while thrashing)
+        print(f"  [page {i+1}/{n}] {dt:.1f}s  elements={len(page_elems)}", flush=True)
     return elements, timings, n
 
 
@@ -112,18 +117,36 @@ def report_chunking(chunks: list[Chunk]) -> None:
         print(f"    {c.text[:160]}")
 
 
+def save_chunks(chunks: list[Chunk], output_dir: str, doc_id: str) -> Path:
+    """Persist chunks as JSONL to {output_dir}/{doc_id}.jsonl."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{doc_id}.jsonl"
+    with out_path.open("w", encoding="utf-8") as f:
+        for c in chunks:
+            f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
+    return out_path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("pdf", help="path to a scanned PDF")
     ap.add_argument("--dpi", type=int, default=200)
     ap.add_argument("--max-pages", type=int, default=0, help="limit pages for a quick test (0 = all)")
     ap.add_argument("--doc-id", default="sample")
+    ap.add_argument("--output-dir", default=None, help="directory to persist chunks as JSONL")
     args = ap.parse_args()
 
     analyzer = PaddleStructureAnalyzer()
     elements, timings, n = analyze(analyzer, args.pdf, args.dpi, args.max_pages)
     report_detection(elements, timings, n)
-    report_chunking(group_and_chunk(elements, args.doc_id))
+
+    chunks = group_and_chunk(elements, args.doc_id)
+    report_chunking(chunks)
+
+    if args.output_dir:
+        path = save_chunks(chunks, args.output_dir, args.doc_id)
+        print(f"\n  chunks saved to: {path}")
 
 
 if __name__ == "__main__":

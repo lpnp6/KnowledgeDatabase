@@ -61,9 +61,9 @@ class PaddleStructureAnalyzer(LayoutAnalyzer):
                 elements.append(
                     PageElement(
                         page=page_index,
-                        element_type=self._map_type(block.get("block_label", "")),
-                        text=block.get("block_content", "") or "",
-                        bbox=self._extract_bbox(block.get("block_bbox")),
+                        element_type=self._map_type(getattr(block, "label", "")),
+                        text=getattr(block, "content", "") or "",
+                        bbox=self._extract_bbox(getattr(block, "bbox", None)),
                     )
                 )
         return elements
