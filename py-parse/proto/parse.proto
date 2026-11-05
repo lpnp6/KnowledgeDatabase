@@ -40,7 +40,7 @@ message ParseChunk {
 message ChunkMetadata {
   int32 page = 1;
   string heading = 2;
-  int32 heading_level = 3;
+  string chunk_type = 3;   // "text" | "table" | "code" | "image"
 }
 
 message ParseResult {

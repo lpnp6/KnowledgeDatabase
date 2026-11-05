@@ -3,8 +3,15 @@ grpcio>=1.60
 grpcio-tools>=1.60
 protobuf>=4.25
 
-# Document parsing
+# Document rendering / parsing
 PyMuPDF>=1.24
+
+# ML layout detection (scanned docs)
+# Use paddlepaddle-gpu with a CUDA-matched version when running on the 4060.
+paddlepaddle>=2.6
+paddleocr>=2.7
+opencv-python>=4.8
+numpy>=1.24
 
 # Storage adapters (install only what you use)
 minio>=7.2
