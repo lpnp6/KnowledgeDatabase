@@ -1,12 +1,11 @@
-"""MinerU adapter: parse documents via a locally deployed `mineru-api` service.
+"""MinerU adapter: parse documents via a locally deployed MinerU HTTP service.
 
-MinerU runs as a standalone HTTP service (model weights loaded once, GPU/CPU
-resident). This client uploads the raw PDF to that service and returns the
-flat `content_list` (blocks already in reading order) that the chunker consumes.
-
-Deployment note (local): start the service with
-    mineru-api --host 0.0.0.0 --port 8000
-then point `base_url` at it (default ``http://localhost:8000``).
+MinerU 4.1+ exposes a V1 API (`POST /v1/file_parse`). The PDF goes in as a
+multipart *file part* (`files`); options go as **query-string** params — the
+endpoint rejects any multipart field (`Too many fields`), so no form fields are
+sent. `output_formats=structured_content` returns pages→blocks inline; this
+client flattens that into a single reading-ordered list of block dicts (each
+augmented with `page_idx`) for the chunker to consume.
 """
 from __future__ import annotations
 
@@ -16,10 +15,6 @@ import httpx
 
 from ..ports.document_extractor import DocumentExtractError, DocumentExtractor
 
-# mineru-api's synchronous parse endpoint (FastAPI). Multipart file upload with
-# `return_content_list=true` returns the structured block list instead of just
-# Markdown. MinerU 4.1+ moved this under `/v1` (breaking change); override with
-# `parse_path` for other versions (e.g. older `/file_parse` or `/api/parse`).
 _PARSE_PATH = "/v1/file_parse"
 _HEALTH_PATH = "/health"
 
@@ -30,7 +25,7 @@ class MineruClient(DocumentExtractor):
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
-        timeout: float = 300.0,
+        timeout: float = 3600.0,
         parse_path: str = _PARSE_PATH,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -39,16 +34,16 @@ class MineruClient(DocumentExtractor):
 
     def extract(self, pdf_bytes: bytes) -> list[dict]:
         url = f"{self._base_url}{self._parse_path}"
+        params = {"output_formats": "structured_content"}
         files = {"files": ("doc.pdf", pdf_bytes, "application/pdf")}
-        data = {"return_content_list": "true"}
         try:
             with httpx.Client(timeout=self._timeout) as client:
-                resp = client.post(url, files=files, data=data)
+                resp = client.post(url, params=params, files=files)
                 resp.raise_for_status()
         except httpx.HTTPError as e:
             raise DocumentExtractError(f"mineru-api request failed: {e}") from e
 
-        return self._parse_content_list(resp.json())
+        return self._flatten(resp.json())
 
     def health(self) -> bool:
         """Best-effort liveness probe; returns False instead of raising."""
@@ -59,17 +54,28 @@ class MineruClient(DocumentExtractor):
             return False
 
     @staticmethod
-    def _parse_content_list(payload: Any) -> list[dict]:
-        """Tolerate the couple of response shapes mineru-api has emitted."""
-        # Shape 1: the response IS the content list.
-        if isinstance(payload, list):
-            return payload
-        # Shape 2: an object wrapping the list under a `content_list` key.
-        if isinstance(payload, dict) and "content_list" in payload:
-            value = payload["content_list"]
-            if isinstance(value, list):
-                return value
-        raise DocumentExtractError(
-            "unexpected mineru-api response: expected a content list "
-            f"(array or object with `content_list`), got {type(payload).__name__}"
-        )
+    def _flatten(payload: Any) -> list[dict]:
+        """Flatten `files[0].content.structured_content.pages[]` into block dicts."""
+        if not isinstance(payload, dict):
+            raise DocumentExtractError(
+                f"unexpected mineru-api response: expected object, got {type(payload).__name__}"
+            )
+        status = payload.get("status")
+        if status not in (None, "completed"):
+            raise DocumentExtractError(f"mineru-api returned status {status!r}")
+
+        try:
+            pages = payload["files"][0]["content"]["structured_content"]["pages"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise DocumentExtractError(
+                "unexpected response shape: missing files[0].content.structured_content.pages"
+            ) from e
+
+        blocks: list[dict] = []
+        for page in pages:
+            page_idx = int(page.get("page_idx", 0))
+            for block in page.get("blocks", []):
+                flat = dict(block)
+                flat["page_idx"] = page_idx
+                blocks.append(flat)
+        return blocks

@@ -34,6 +34,16 @@ _SENTENCE_END = re.compile(r"[。！？!?；;.\n]")
 
 _CJK = re.compile(r"[一-鿿]")
 
+# structured_content block types that act as headings (set the nearest title).
+_TITLE_TYPES = {
+    "doc_title", "title", "paragraph_title", "section_title",
+    "subsection_title", "chapter_title",
+}
+# structured_content block types to drop (page furniture, not body content).
+_IGNORE_TYPES = {
+    "aside_text", "page_footnote", "page_number", "header", "footer",
+}
+
 
 def estimate_tokens(text: str) -> int:
     """Token estimate adapted to the dominant script (CJK ~2.1 chars/token,
@@ -168,12 +178,21 @@ def _html_to_text(fragment: str) -> str:
     return fragment.strip()
 
 
-def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
-    """Chunk a MinerU `content_list` into `Chunk` objects.
+def _clean_inline(text: str) -> str:
+    """Strip inline HTML (e.g. <sup>1</sup>) from a block's text content."""
+    if not text:
+        return ""
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    return _html.unescape(text).strip()
 
-    Blocks are assumed to already be in reading order. Text with `text_level`
-    > 0 sets the current heading; body text (and lists/equations) accumulate
-    and get packed; tables / code / captioned images become dedicated chunks.
+
+def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
+    """Chunk a MinerU `structured_content` block list into `Chunk` objects.
+
+    Blocks are already in reading order. A heading-type block (doc_title /
+    paragraph_title / …) sets the current heading; body text (text / list /
+    equation) accumulates and gets packed; tables / code / captioned images
+    become dedicated chunks. Page furniture (footers, page numbers) is dropped.
     """
     chunks: list[Chunk] = []
     idx = 0
@@ -195,29 +214,21 @@ def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
         btype = block.get("type", "text")
         page = int(block.get("page_idx", 0))
 
-        if btype == "text":
-            level = block.get("text_level")
-            text = block.get("text", "") or ""
-            if level is not None and level > 0:
-                flush_body()
-                current_heading = text
-            else:
-                body.append((text, page))
-
-        elif btype in ("list", "equation"):
-            body.append((block.get("text", "") or "", page))
+        if btype in _TITLE_TYPES:
+            flush_body()
+            current_heading = _clean_inline(block.get("content", "") or "")
 
         elif btype == "table":
             flush_body()
-            caption = _join_text(block.get("table_caption"))
-            body_text = _html_to_text(block.get("table_body", "") or "")
+            caption = _join_text(block.get("table_caption") or block.get("caption"))
+            body_text = _html_to_text(block.get("table_body") or block.get("content") or "")
             content = "\n".join(p for p in (caption, body_text) if p)
             if content:
                 chunks.append(_make_chunk(current_heading, content, "table", page, doc_id, idx))
                 idx += 1
 
         elif btype == "image":
-            caption = _join_text(block.get("image_caption"))
+            caption = _join_text(block.get("image_caption") or block.get("caption"))
             if caption:
                 flush_body()
                 chunks.append(_make_chunk(current_heading, caption, "image", page, doc_id, idx))
@@ -225,12 +236,17 @@ def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
 
         elif btype == "code":
             flush_body()
-            code = block.get("text", "") or ""
+            code = block.get("content", "") or ""
             if code:
                 chunks.append(_make_chunk(current_heading, code, "code", page, doc_id, idx))
                 idx += 1
 
-        # unknown types are ignored
+        elif btype in _IGNORE_TYPES:
+            continue  # drop footers / page numbers / aside text
+
+        else:
+            # body text: "text", "list", "equation", and anything unrecognised
+            body.append((_clean_inline(block.get("content", "") or ""), page))
 
     flush_body()
     return chunks

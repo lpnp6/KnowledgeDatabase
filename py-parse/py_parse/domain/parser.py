@@ -38,10 +38,10 @@ class DocumentParser:
 
     @staticmethod
     def _extract_title(content_list: list[dict]) -> str:
-        """Best-effort document title = the first level-1 heading."""
+        """Best-effort document title = the first `doc_title` block."""
         for block in content_list:
-            if block.get("type") == "text" and block.get("text_level") == 1:
-                text = block.get("text") or ""
+            if block.get("type") == "doc_title":
+                text = block.get("content") or ""
                 if text.strip():
                     return text.strip()
         return ""

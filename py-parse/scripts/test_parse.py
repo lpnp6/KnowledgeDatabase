@@ -43,9 +43,9 @@ def report_extraction(content_list: list[dict]) -> None:
     print(f"\n  blocks: {total}")
 
     headings = [
-        b.get("text", "")
+        b.get("content", "")
         for b in content_list
-        if b.get("type") == "text" and b.get("text_level") is not None and b.get("text_level") > 0
+        if isinstance(b.get("type"), str) and "title" in b.get("type")
     ]
     print(f"\n  detected headings ({len(headings)}):")
     for h in headings[:25]:
