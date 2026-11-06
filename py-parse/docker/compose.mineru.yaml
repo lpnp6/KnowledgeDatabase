@@ -1,57 +1,103 @@
-# MinerU single-instance deployment — one card per service
+# MinerU 4.x single-instance deployment — one card per service
 #
-# Runs a single mineru-api container bound to one GPU. On a multi-GPU machine,
-# deploy multiple instances distinguished by GPU_INDEX (each its own compose
-# project):
+# Two containers per instance, both from the locally built `mineru:4` image:
+#   mineru-api        mineru-kit api-server  — GPU parsing engine, internal only,
+#                     serves the asynchronous Tasks API (/v1/tasks, /v1/health)
+#   mineru-file-parse mineru-kit file-parse-server — synchronous single-file
+#                     wrapper for `POST /v1/file_parse`, which is what
+#                     py_parse's MineruClient calls; published on API_PORT
 #
-#   # GPU 0:
-#   GPU_INDEX=0 docker compose -f docker/compose.mineru.yaml -p mineru0 up -d
-#   # GPU 1:
-#   GPU_INDEX=1 docker compose -f docker/compose.mineru.yaml -p mineru1 up -d
+# (In MinerU 4.1 the synchronous endpoint moved out of api-server into this
+# standalone wrapper — api-server returns 404 for /v1/file_parse.)
+#
+#   docker compose -f docker/compose.mineru.yaml up -d --build
+#
+# On a multi-GPU machine, deploy multiple instances distinguished by GPU_INDEX
+# and API_PORT (each its own compose project):
+#
+#   GPU_INDEX=0 API_PORT=8000 docker compose -f docker/compose.mineru.yaml -p mineru0 up -d --build
+#   GPU_INDEX=1 API_PORT=8001 docker compose -f docker/compose.mineru.yaml -p mineru1 up -d --build
 #
 # Prerequisites:
-#   - Linux (Docker MinerU does not support macOS GPU acceleration)
-#   - NVIDIA GPU (Volta+, 8GB+ VRAM) + NVIDIA Container Toolkit (nvidia-smi visible in container)
-#   - First start downloads model weights (ModelScope mirror); persisted by mineru-cache volume
+#   - Linux or Windows with WSL2 (Docker Desktop); Docker MinerU has no macOS
+#     GPU acceleration
+#   - NVIDIA GPU (Volta+, 8GB+ VRAM) + working GPU passthrough
+#     (verify: docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi)
+#   - ~40GB free disk for the image + build cache; the first build downloads the
+#     vLLM base image and model weights, so it takes a while
 #
-# Verify: curl http://localhost:8000/health
-# Docs:   http://localhost:8000/docs
-#
-# Image note: the ghcr.io prebuilt image already bundles CUDA torch (no manual torch
-# install). If it is unavailable or you need to pin a version, build from source:
-#   git clone https://github.com/opendatalab/MinerU && cd MinerU/docker
-#   docker build -t mineru:latest .   # then change `image` below to mineru:latest
+# Verify: curl http://localhost:8000/docs     (file-parse wrapper)
+#         curl http://localhost:8001/v1/health (engine, if ENGINE_DEBUG_PORT set)
+# Docs:   https://opendatalab.github.io/MinerU/usage/file_parse
+
+name: mineru
 
 services:
   mineru-api:
-    image: ghcr.io/opendatalab/mineru-core:latest
-    container_name: mineru-api
+    build:
+      context: .
+      dockerfile: Dockerfile.mineru
+      # Base image / pip / model mirrors can be overridden here
+      # args:
+      #   VLLM_IMAGE: vllm/vllm-openai:v0.21.0   # or docker.m.daocloud.io/... if Hub is blocked
+      #   MINERU_PIP_INDEX: https://mirrors.aliyun.com/pypi/simple
+      #   MINERU_MODEL_SOURCE_ARG: modelscope
+    image: mineru:4
+    container_name: mineru-api-${GPU_INDEX:-0}
     restart: always
-    ports:
-      - "8000:8000"
+    # Expose the Tasks API on the host only for debugging
+    # ports:
+    #   - "${ENGINE_DEBUG_PORT:-8001}:8000"
     environment:
-      # one card per service: bind to a specific GPU (default 0; set per instance)
-      NVIDIA_VISIBLE_DEVICES: ${GPU_INDEX:-0}
-      # domestic model download source (drop if HuggingFace is reachable)
-      MINERU_MODEL_SOURCE: modelscope
+      # weights are baked into the image at build time
+      MINERU_MODEL_SOURCE: local
       TZ: Asia/Shanghai
-      # in-process concurrency lanes — the key to keeping the GPU busy (2~4 for a 12GB card)
-      MAX_WORKERS: ${MAX_WORKERS:-2}
-    volumes:
-      - mineru-cache:/app/cache      # model weights (persisted to avoid re-download)
-      - mineru-uploads:/app/uploads
-      - mineru-logs:/app/logs
-    # --allow-public-http-client permits non-local callers (py-parse from another container/host)
-    command: mineru-api --host 0.0.0.0 --port 8000 --allow-public-http-client
+    entrypoint: ["mineru-kit"]
+    command:
+      - api-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/v1/health || exit 1"]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 1               # single GPU
+              device_ids: ["${GPU_INDEX:-0}"]   # one card per service
               capabilities: [gpu]
 
+  mineru-file-parse:
+    image: mineru:4
+    container_name: mineru-file-parse-${GPU_INDEX:-0}
+    restart: always
+    ports:
+      - "${API_PORT:-8000}:8003"
+    depends_on:
+      mineru-api:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    entrypoint: ["mineru-kit"]
+    command:
+      - file-parse-server
+      - --api-url
+      - http://mineru-api:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/docs || exit 1"]
+    volumes:
+      # recovery state (request_id → task_id); survives wrapper restarts
+      - mineru-file-parse-state:/root/.mineru
+
 volumes:
-  mineru-cache:
-  mineru-uploads:
-  mineru-logs:
+  mineru-file-parse-state:

@@ -1,23 +1,30 @@
-# MinerU 解析服务 + py-parse 异步解析栈 —— 本地 Docker 部署
+# 全栈本地部署：MinerU 4.x 解析服务 + py-parse 异步解析栈
 #
-# 服务拓扑：
-#   mineru-api   : 文档抽取（GPU，MinerU HTTP API，端口 8000）
-#   redis        : Celery broker + 任务状态热缓存
-#   postgres     : 任务结果持久化（tasks + chunks）
-#   celery-worker: 消费队列，跑 read→extract→chunk 重活
-#   py-parse     : gRPC 控制面（SubmitParse / GetResult），端口 50051
+# MinerU 4.1 拆成两个服务：
+#   - mineru-api          : GPU 解析引擎（异步 Tasks API，端口 8000，内部）
+#   - mineru-file-parse   : 同步 /v1/file_parse 包装层（MineruClient 调它，对外 8000→8003）
 #
-# 启动：  docker compose -f docker/compose.yaml up -d
-# 健康：  curl http://localhost:8000/health        （mineru）
-#         docker compose exec redis redis-cli ping （redis）
-#         docker compose exec postgres pg_isready -U postgres
+# py-parse 异步栈：
+#   - redis               : Celery broker + 任务状态热缓存
+#   - postgres            : 任务结果持久化（tasks + chunks）
+#   - celery-worker       : 消费队列，跑 read→extract→chunk 重活
+#   - py-parse            : gRPC 控制面（SubmitParse / GetResult），端口 50051
 #
-# 注：若 ghcr.io 预构建镜像不可用/版本不符，可从官方仓库自构建 MinerU：
-#   git clone https://github.com/opendatalab/MinerU && cd MinerU/docker
-#   docker build -t mineru:latest .   # 再把下面的 image 改成 mineru:latest
+# 前提：
+#   - Linux 或 Windows WSL2（Docker 版 MinerU 不支持 macOS GPU 加速）
+#   - NVIDIA GPU（Volta+，建议 8GB+ 显存）+ 可用的 GPU 透传
+#     （验证：docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi）
+#   - MinerU 官方不再发布预构建镜像，mineru-api 由本目录的 Dockerfile.mineru 构建，
+#     模型权重在构建时下载并打进镜像（镜像很大，首次构建耗时较久）
+#
+# 启动：  docker compose -f docker/compose.yaml up -d --build
+# 健康：  curl http://localhost:8000/docs     （file-parse 包装层）
+# 文档：  https://opendatalab.github.io/MinerU/usage/file_parse
+
+name: py-parse
 
 x-parse-env: &parse-env
-  MINERU_URL: http://mineru-api:8000   # compose 网络内访问 mineru
+  MINERU_URL: http://mineru-file-parse:8003   # file-parse 包装层（同步 /v1/file_parse）
   REDIS_URL: redis://redis:6379/0
   POSTGRES_DSN: postgresql+psycopg://postgres:postgres@postgres:5432/pyparse
   RESULT_TTL_SECONDS: "3600"
@@ -32,21 +39,29 @@ x-parse-env: &parse-env
 
 services:
   mineru-api:
-    image: ghcr.io/opendatalab/mineru-core:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.mineru
+    image: mineru:4
     container_name: mineru-api
     restart: always
-    ports:
-      - "8000:8000"
     environment:
-      MINERU_MODEL_SOURCE: modelscope   # 国内模型下载源；网络可达 HuggingFace 时可去掉
+      # 权重已打进镜像，运行期不再联网下载
+      MINERU_MODEL_SOURCE: local
       TZ: Asia/Shanghai
-      MAX_WORKERS: "4"
-    volumes:
-      - mineru-cache:/app/cache      # 模型权重缓存（持久化，避免每次重建镜像都重下模型）
-      - mineru-uploads:/app/uploads
-      - mineru-logs:/app/logs
-    # --allow-public-http-client 允许非本机调用（py-parse 从其它容器访问时需要）
-    command: mineru-api --host 0.0.0.0 --port 8000 --allow-public-http-client
+    entrypoint: ["mineru-kit"]
+    command:
+      - api-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/v1/health || exit 1"]
     deploy:
       resources:
         reservations:
@@ -54,6 +69,32 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # 同步单文件解析包装层：对外暴露 /v1/file_parse（MineruClient 调的就是它）
+  mineru-file-parse:
+    image: mineru:4
+    container_name: mineru-file-parse
+    restart: always
+    ports:
+      - "8000:8003"
+    depends_on:
+      mineru-api:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    entrypoint: ["mineru-kit"]
+    command:
+      - file-parse-server
+      - --api-url
+      - http://mineru-api:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/docs || exit 1"]
+    volumes:
+      - mineru-file-parse-state:/root/.mineru
 
   redis:
     image: redis:7-alpine
@@ -99,8 +140,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      mineru-api:
-        condition: service_started
+      mineru-file-parse:
+        condition: service_healthy
     environment:
       <<: *parse-env
       CELERY_WORKER_CONCURRENCY: "${CELERY_WORKER_CONCURRENCY:-2}"
@@ -143,8 +184,7 @@ services:
       start_period: 10s
 
 volumes:
-  mineru-cache:
-  mineru-uploads:
-  mineru-logs:
+  # file-parse 的恢复状态（request_id → task_id），重启后仍可查询
+  mineru-file-parse-state:
   redis-data:
   pgdata:

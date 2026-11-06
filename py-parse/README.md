@@ -33,12 +33,20 @@ proto/
 
 py-parser does **not** bundle MinerU; it talks to a MinerU HTTP service.
 
+MinerU 4.1 splits the service in two: `mineru-kit api-server` runs the GPU
+parsing engine (asynchronous Tasks API), while the synchronous
+`POST /v1/file_parse` that this client uses lives in a separate
+`mineru-kit file-parse-server` wrapper. Both are required.
+
 ### Option 1: Docker
 
 ```bash
 docker compose -f docker/compose.yaml up -d
-curl http://localhost:8000/health     # → ok
+curl http://localhost:8000/docs     # → file-parse wrapper's OpenAPI page
 ```
+
+`docker/compose.mineru.yaml` starts just the two MinerU services (engine +
+wrapper) without the gRPC server.
 
 ### Option 2: pip (bare metal)
 
@@ -51,11 +59,32 @@ pip install -r requirements-mineru.txt
 # 2. Confirm GPU is used (False = torch was installed as CPU build)
 python -c "import torch; print(torch.cuda.is_available())"
 
-# 3. Download models + start the API
+# 3. Download models, then start the engine and the sync wrapper
 export MINERU_MODEL_SOURCE=modelscope
-mineru-models-download
-mineru-api --host 0.0.0.0 --port 8000
+mineru-kit models download --tier standard --small-backend torch --vlm-engine vllm
+mineru-kit api-server --host 127.0.0.1 --port 8000
+
+# in a second terminal, same env: the endpoint the client actually calls
+mineru-kit file-parse-server --api-url http://127.0.0.1:8000 --host 0.0.0.0 --port 8003
 ```
+
+Point `MINERU_URL` / `MineruClient(base_url=...)` at the wrapper (port 8003
+above; Docker publishes it on 8000).
+
+### What the client does with MinerU's output
+
+The `default` format returns a ZIP containing both `structured_content.json`
+and `middle_json.json`; the adapter reads both.
+
+- **Figure / chart captions** become their own `image` chunks. MinerU labels
+  plots `chart`; both types are treated as figures, and an uncaptioned figure
+  is skipped rather than emitted empty.
+- **Tables** are re-rendered from `middle_json`'s HTML, which still carries
+  `rowspan`/`colspan`. `structured_content`'s markdown has already flattened
+  them, which merges multi-level headers into a broken row; the HTML path
+  emits qualified column names such as `BLEU / EN-DE` and repeats rowspan
+  group labels. A table's `heading` is re-attributed to the nearest section
+  that references `Table N`, since floated tables land at the top of a page.
 
 See `requirements-mineru.txt` and `docker/compose.yaml` for full details.
 

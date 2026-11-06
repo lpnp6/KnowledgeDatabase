@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """Validate extraction + chunking against a local MinerU service.
 
-Prerequisite: a `mineru-api` service running locally (see README), e.g.
-    mineru-api --host 0.0.0.0 --port 8000
+Prerequisite: a `mineru-kit file-parse-server` wrapper running locally against a
+`mineru-kit api-server` engine (see README), e.g.
+    mineru-kit api-server --host 127.0.0.1 --port 8000
+    mineru-kit file-parse-server --api-url http://127.0.0.1:8000 --port 8003
 
 Run from the py-parse/ directory:
     python scripts/test_parse.py /path/to/doc.pdf --doc-id sample --output-dir out
@@ -60,6 +62,9 @@ def report_chunking(chunks: list[Chunk]) -> None:
     print(f"  total chunks: {len(chunks)}")
     for kind in sorted(by_type):
         print(f"    {kind:8s} {by_type[kind]}")
+
+    empty = [c.chunk_id for c in chunks if not c.text.strip()]
+    print(f"  empty chunks: {len(empty)}" + (f"  {empty}" if empty else ""))
 
     sizes = sorted(estimate_tokens(c.text) for c in chunks if c.metadata.chunk_type == "text")
     if sizes:
