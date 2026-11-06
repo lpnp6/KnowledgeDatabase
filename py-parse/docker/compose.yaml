@@ -40,6 +40,47 @@ services:
               count: all
               capabilities: [gpu]
 
+  # py-parse：对外暴露 gRPC ParseService，文档抽取委托给上面的 mineru-api。
+  py-parse:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: py-parse
+    restart: always
+    depends_on:
+      - mineru-api
+    ports:
+      - "50051:50051"
+    environment:
+      MINERU_URL: http://mineru-api:8000   # compose 网络内访问 mineru
+      GRPC_HOST: 0.0.0.0
+      GRPC_PORT: "50051"
+      # 可选：启用 minio/s3 存储后端时取消注释并填入连接配置
+      # MINIO_ENDPOINT: minio:9000
+      # MINIO_ACCESS_KEY: ...
+      # MINIO_SECRET_KEY: ...
+      # S3_ENDPOINT_URL: http://minio:9000
+      # S3_REGION: us-east-1
+      # S3_ACCESS_KEY: ...
+      # S3_SECRET_KEY: ...
+    healthcheck:
+      # 用标准 gRPC health 服务探测（grpcio-health-checking 已在镜像内）
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import grpc
+          from grpc_health.v1 import health_pb2, health_pb2_grpc
+          ch = grpc.insecure_channel('localhost:50051')
+          r = health_pb2_grpc.HealthStub(ch).Check(
+              health_pb2.HealthCheckRequest(), timeout=5)
+          assert r.status == health_pb2.HealthCheckResponse.SERVING
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
 volumes:
   mineru-cache:
   mineru-uploads:

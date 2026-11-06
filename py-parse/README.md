@@ -56,6 +56,29 @@ This prints an extraction report (block-type counts, detected headings), a
 chunking report (token distribution, samples), and persists chunks as JSONL to
 `out/sample.jsonl`.
 
+## Run the gRPC service (Docker)
+
+`docker/compose.yaml` starts both the MinerU service and the py-parse gRPC
+server, wired together over the compose network:
+
+```bash
+docker compose -f docker/compose.yaml up -d
+```
+
+- gRPC endpoint: `localhost:50051` (service `parse.v1.ParseService`)
+- Health probe: standard gRPC health service (`grpc-health-probe` compatible)
+- `MINERU_URL` is set to `http://mineru-api:8000` inside the compose network
+
+Start the server directly (no Docker) with `python -m py_parse`; see
+`py_parse/config.py` for the env vars (`GRPC_PORT`, `MINERU_URL`, storage
+credentials).
+
+Test the gRPC contract end-to-end:
+
+```bash
+python scripts/grpc_client.py file:///path/to/doc.pdf --doc-id sample
+```
+
 ## Storage abstraction
 
 - `source` is a uniform URI: `file:///...` / `minio://...` / `s3://...`; the

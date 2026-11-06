@@ -18,20 +18,27 @@ from ..ports.document_extractor import DocumentExtractError, DocumentExtractor
 
 # mineru-api's synchronous parse endpoint (FastAPI). Multipart file upload with
 # `return_content_list=true` returns the structured block list instead of just
-# Markdown.
-_PARSE_PATH = "/file_parse"
+# Markdown. MinerU 4.1+ moved this under `/v1` (breaking change); override with
+# `parse_path` for other versions (e.g. older `/file_parse` or `/api/parse`).
+_PARSE_PATH = "/v1/file_parse"
 _HEALTH_PATH = "/health"
 
 
 class MineruClient(DocumentExtractor):
     """Thin HTTP client over a local mineru-api deployment."""
 
-    def __init__(self, base_url: str = "http://localhost:8000", timeout: float = 300.0) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        timeout: float = 300.0,
+        parse_path: str = _PARSE_PATH,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._parse_path = parse_path
 
     def extract(self, pdf_bytes: bytes) -> list[dict]:
-        url = f"{self._base_url}{_PARSE_PATH}"
+        url = f"{self._base_url}{self._parse_path}"
         files = {"files": ("doc.pdf", pdf_bytes, "application/pdf")}
         data = {"return_content_list": "true"}
         try:
