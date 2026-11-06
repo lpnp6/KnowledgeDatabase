@@ -15,10 +15,13 @@ Note: the generated `parse_pb2_grpc.py` is patched to use a relative import
 from .parse_pb2 import (  # noqa: F401
     ChunkMetadata,
     DocMeta,
+    GetResultRequest,
+    GetResultResponse,
     ParseChunk,
     ParseRequest,
-    ParseResponse,
     ParseResult,
+    SubmitParseResponse,
+    TaskStatus,
 )
 from .parse_pb2_grpc import (  # noqa: F401
     ParseService,
@@ -30,10 +33,13 @@ from .parse_pb2_grpc import (  # noqa: F401
 __all__ = [
     "ChunkMetadata",
     "DocMeta",
+    "GetResultRequest",
+    "GetResultResponse",
     "ParseChunk",
     "ParseRequest",
-    "ParseResponse",
     "ParseResult",
+    "SubmitParseResponse",
+    "TaskStatus",
     "ParseService",
     "ParseServiceServicer",
     "ParseServiceStub",

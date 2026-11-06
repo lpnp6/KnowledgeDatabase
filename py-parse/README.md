@@ -1,7 +1,8 @@
 # py-parser
 
 Enterprise document parsing service. Single responsibility: parse a document
-into structured chunks with metadata, streamed over gRPC server-streaming.
+into structured chunks with metadata. Exposed as an async gRPC API
+(`SubmitParse` → poll `GetResult`), backed by a Celery worker pool.
 
 Document extraction is delegated to **MinerU** (running as a separate HTTP
 service); this package owns the chunking logic and the gRPC contract.
@@ -71,24 +72,33 @@ This prints an extraction report (block-type counts, detected headings), a
 chunking report (token distribution, samples), and persists chunks as JSONL to
 `out/sample.jsonl`.
 
-## Run the gRPC service (Docker)
+## Run the async parse stack (Docker)
 
-`docker/compose.yaml` starts both the MinerU service and the py-parse gRPC
-server, wired together over the compose network:
+`docker/compose.yaml` starts the full async stack:
 
 ```bash
 docker compose -f docker/compose.yaml up -d
 ```
 
+Services: `mineru-api` (document extraction, GPU), `redis` (Celery broker +
+task status), `postgres` (durable results), `celery-worker` (parse jobs), and
+`py-parse` (gRPC control plane).
+
 - gRPC endpoint: `localhost:50051` (service `parse.v1.ParseService`)
+- API: `SubmitParse` (returns `task_id`) → poll `GetResult(task_id)`
 - Health probe: standard gRPC health service (`grpc-health-probe` compatible)
-- `MINERU_URL` is set to `http://mineru-api:8000` inside the compose network
 
-Start the server directly (no Docker) with `python -m py_parse`; see
-`py_parse/config.py` for the env vars (`GRPC_PORT`, `MINERU_URL`, storage
-credentials).
+Run the gRPC server directly (no Docker) with `python -m py_parse`, and a
+worker with:
 
-Test the gRPC contract end-to-end:
+```bash
+celery -A py_parse.adapters.celery_app worker --loglevel=info -c 2
+```
+
+See `py_parse/config.py` for env vars (`GRPC_PORT`, `REDIS_URL`, `POSTGRES_DSN`,
+`MINERU_URL`, storage credentials).
+
+Test the async contract end-to-end:
 
 ```bash
 python scripts/grpc_client.py file:///path/to/doc.pdf --doc-id sample

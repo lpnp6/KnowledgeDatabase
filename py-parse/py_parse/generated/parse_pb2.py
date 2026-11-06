@@ -24,25 +24,31 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bparse.proto\x12\x08parse.v1\".\n\x0cParseRequest\x12\x0e\n\x06\x64oc_id\x18\x01 \x01(\t\x12\x0e\n\x06source\x18\x02 \x01(\t\"h\n\rParseResponse\x12%\n\x05\x63hunk\x18\x01 \x01(\x0b\x32\x14.parse.v1.ParseChunkH\x00\x12%\n\x04\x64one\x18\x02 \x01(\x0b\x32\x15.parse.v1.ParseResultH\x00\x42\t\n\x07payload\"W\n\nParseChunk\x12\x10\n\x08\x63hunk_id\x18\x01 \x01(\t\x12\x0c\n\x04text\x18\x02 \x01(\t\x12)\n\x08metadata\x18\x03 \x01(\x0b\x32\x17.parse.v1.ChunkMetadata\"B\n\rChunkMetadata\x12\x0c\n\x04page\x18\x01 \x01(\x05\x12\x0f\n\x07heading\x18\x02 \x01(\t\x12\x12\n\nchunk_type\x18\x03 \x01(\t\"G\n\x0bParseResult\x12\x13\n\x0b\x63hunk_count\x18\x01 \x01(\x05\x12#\n\x08\x64oc_meta\x18\x02 \x01(\x0b\x32\x11.parse.v1.DocMeta\">\n\x07\x44ocMeta\x12\x13\n\x0btotal_pages\x18\x01 \x01(\x05\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07warning\x18\x03 \x01(\t2J\n\x0cParseService\x12:\n\x05Parse\x12\x16.parse.v1.ParseRequest\x1a\x17.parse.v1.ParseResponse0\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bparse.proto\x12\x08parse.v1\".\n\x0cParseRequest\x12\x0e\n\x06\x64oc_id\x18\x01 \x01(\t\x12\x0e\n\x06source\x18\x02 \x01(\t\"&\n\x13SubmitParseResponse\x12\x0f\n\x07task_id\x18\x01 \x01(\t\"#\n\x10GetResultRequest\x12\x0f\n\x07task_id\x18\x01 \x01(\t\"\xa6\x01\n\x11GetResultResponse\x12\x0f\n\x07task_id\x18\x01 \x01(\t\x12$\n\x06status\x18\x02 \x01(\x0e\x32\x14.parse.v1.TaskStatus\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12%\n\x06result\x18\x04 \x01(\x0b\x32\x15.parse.v1.ParseResult\x12$\n\x06\x63hunks\x18\x05 \x03(\x0b\x32\x14.parse.v1.ParseChunk\"W\n\nParseChunk\x12\x10\n\x08\x63hunk_id\x18\x01 \x01(\t\x12\x0c\n\x04text\x18\x02 \x01(\t\x12)\n\x08metadata\x18\x03 \x01(\x0b\x32\x17.parse.v1.ChunkMetadata\"B\n\rChunkMetadata\x12\x0c\n\x04page\x18\x01 \x01(\x05\x12\x0f\n\x07heading\x18\x02 \x01(\t\x12\x12\n\nchunk_type\x18\x03 \x01(\t\"G\n\x0bParseResult\x12\x13\n\x0b\x63hunk_count\x18\x01 \x01(\x05\x12#\n\x08\x64oc_meta\x18\x02 \x01(\x0b\x32\x11.parse.v1.DocMeta\">\n\x07\x44ocMeta\x12\x13\n\x0btotal_pages\x18\x01 \x01(\x05\x12\r\n\x05title\x18\x02 \x01(\t\x12\x0f\n\x07warning\x18\x03 \x01(\t*\x8c\x01\n\nTaskStatus\x12\x1b\n\x17TASK_STATUS_UNSPECIFIED\x10\x00\x12\x17\n\x13TASK_STATUS_PENDING\x10\x01\x12\x17\n\x13TASK_STATUS_RUNNING\x10\x02\x12\x17\n\x13TASK_STATUS_SUCCESS\x10\x03\x12\x16\n\x12TASK_STATUS_FAILED\x10\x04\x32\x9a\x01\n\x0cParseService\x12\x44\n\x0bSubmitParse\x12\x16.parse.v1.ParseRequest\x1a\x1d.parse.v1.SubmitParseResponse\x12\x44\n\tGetResult\x12\x1a.parse.v1.GetResultRequest\x1a\x1b.parse.v1.GetResultResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'parse_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_TASKSTATUS']._serialized_start=614
+  _globals['_TASKSTATUS']._serialized_end=754
   _globals['_PARSEREQUEST']._serialized_start=25
   _globals['_PARSEREQUEST']._serialized_end=71
-  _globals['_PARSERESPONSE']._serialized_start=73
-  _globals['_PARSERESPONSE']._serialized_end=177
-  _globals['_PARSECHUNK']._serialized_start=179
-  _globals['_PARSECHUNK']._serialized_end=266
-  _globals['_CHUNKMETADATA']._serialized_start=268
-  _globals['_CHUNKMETADATA']._serialized_end=334
-  _globals['_PARSERESULT']._serialized_start=336
-  _globals['_PARSERESULT']._serialized_end=407
-  _globals['_DOCMETA']._serialized_start=409
-  _globals['_DOCMETA']._serialized_end=471
-  _globals['_PARSESERVICE']._serialized_start=473
-  _globals['_PARSESERVICE']._serialized_end=547
+  _globals['_SUBMITPARSERESPONSE']._serialized_start=73
+  _globals['_SUBMITPARSERESPONSE']._serialized_end=111
+  _globals['_GETRESULTREQUEST']._serialized_start=113
+  _globals['_GETRESULTREQUEST']._serialized_end=148
+  _globals['_GETRESULTRESPONSE']._serialized_start=151
+  _globals['_GETRESULTRESPONSE']._serialized_end=317
+  _globals['_PARSECHUNK']._serialized_start=319
+  _globals['_PARSECHUNK']._serialized_end=406
+  _globals['_CHUNKMETADATA']._serialized_start=408
+  _globals['_CHUNKMETADATA']._serialized_end=474
+  _globals['_PARSERESULT']._serialized_start=476
+  _globals['_PARSERESULT']._serialized_end=547
+  _globals['_DOCMETA']._serialized_start=549
+  _globals['_DOCMETA']._serialized_end=611
+  _globals['_PARSESERVICE']._serialized_start=757
+  _globals['_PARSESERVICE']._serialized_end=911
 # @@protoc_insertion_point(module_scope)

@@ -44,6 +44,14 @@ class Settings:
     # MinerU (document extraction) — a separate HTTP service
     mineru_url: str = "http://localhost:8000"
     mineru_timeout: float = 300.0
+    # "mineru" (real service) or "stub" (test extractor, no MinerU needed).
+    extractor_backend: str = "mineru"
+
+    # Async task infrastructure (Celery broker + status store)
+    redis_url: str = "redis://localhost:6379/0"
+    postgres_dsn: str = "postgresql+psycopg://postgres:postgres@localhost:5432/pyparse"
+    result_ttl_seconds: int = 3600
+    celery_worker_concurrency: int = 2
 
     # Storage backends. A scheme's reader is only registered when its config
     # is present, so unused backends don't require their SDK clients at all.
@@ -72,6 +80,14 @@ class Settings:
             grpc_max_workers=_int_env("GRPC_MAX_WORKERS", 10),
             mineru_url=get("MINERU_URL", "http://localhost:8000"),
             mineru_timeout=_float_env("MINERU_TIMEOUT", 300.0),
+            extractor_backend=get("EXTRACTOR_BACKEND", "mineru"),
+            redis_url=get("REDIS_URL", "redis://localhost:6379/0"),
+            postgres_dsn=get(
+                "POSTGRES_DSN",
+                "postgresql+psycopg://postgres:postgres@localhost:5432/pyparse",
+            ),
+            result_ttl_seconds=_int_env("RESULT_TTL_SECONDS", 3600),
+            celery_worker_concurrency=_int_env("CELERY_WORKER_CONCURRENCY", 2),
             minio_endpoint=opt("MINIO_ENDPOINT"),
             minio_access_key=opt("MINIO_ACCESS_KEY"),
             minio_secret_key=opt("MINIO_SECRET_KEY"),

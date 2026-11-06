@@ -26,10 +26,12 @@ if _version_not_supported:
 
 
 class ParseServiceStub:
-    """py-parser's external service contract (gRPC server-streaming).
+    """py-parser's external service contract (gRPC, async task model).
 
     Design points:
-    - server-streaming: chunks are pushed one at a time, no giant response in memory.
+    - Async: `SubmitParse` enqueues a parse task and returns a `task_id`
+    immediately; the caller polls `GetResult` for status and (when done)
+    the chunks. Heavy parsing runs in a separate worker pool (Celery).
     - `source` is a uniform URI; the scheme selects the storage backend, the
     remainder is the location within that backend.
     - The request carries only *location* (doc_id + source). Connection config
@@ -42,26 +44,40 @@ class ParseServiceStub:
         Args:
             channel: A grpc.Channel.
         """
-        self.Parse = channel.unary_stream(
-                '/parse.v1.ParseService/Parse',
+        self.SubmitParse = channel.unary_unary(
+                '/parse.v1.ParseService/SubmitParse',
                 request_serializer=parse__pb2.ParseRequest.SerializeToString,
-                response_deserializer=parse__pb2.ParseResponse.FromString,
+                response_deserializer=parse__pb2.SubmitParseResponse.FromString,
+                _registered_method=True)
+        self.GetResult = channel.unary_unary(
+                '/parse.v1.ParseService/GetResult',
+                request_serializer=parse__pb2.GetResultRequest.SerializeToString,
+                response_deserializer=parse__pb2.GetResultResponse.FromString,
                 _registered_method=True)
 
 
 class ParseServiceServicer:
-    """py-parser's external service contract (gRPC server-streaming).
+    """py-parser's external service contract (gRPC, async task model).
 
     Design points:
-    - server-streaming: chunks are pushed one at a time, no giant response in memory.
+    - Async: `SubmitParse` enqueues a parse task and returns a `task_id`
+    immediately; the caller polls `GetResult` for status and (when done)
+    the chunks. Heavy parsing runs in a separate worker pool (Celery).
     - `source` is a uniform URI; the scheme selects the storage backend, the
     remainder is the location within that backend.
     - The request carries only *location* (doc_id + source). Connection config
     (endpoints / credentials) lives in the config center, never in the request.
     """
 
-    def Parse(self, request, context):
-        """Parse a document, streaming chunks one by one, then a final `done` summary.
+    def SubmitParse(self, request, context):
+        """Enqueue a parse task. Returns immediately with a task_id for polling.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetResult(self, request, context):
+        """Poll task status and (once SUCCESS) fetch the parsed chunks.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -70,10 +86,15 @@ class ParseServiceServicer:
 
 def add_ParseServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Parse': grpc.unary_stream_rpc_method_handler(
-                    servicer.Parse,
+            'SubmitParse': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitParse,
                     request_deserializer=parse__pb2.ParseRequest.FromString,
-                    response_serializer=parse__pb2.ParseResponse.SerializeToString,
+                    response_serializer=parse__pb2.SubmitParseResponse.SerializeToString,
+            ),
+            'GetResult': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetResult,
+                    request_deserializer=parse__pb2.GetResultRequest.FromString,
+                    response_serializer=parse__pb2.GetResultResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -84,10 +105,12 @@ def add_ParseServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class ParseService:
-    """py-parser's external service contract (gRPC server-streaming).
+    """py-parser's external service contract (gRPC, async task model).
 
     Design points:
-    - server-streaming: chunks are pushed one at a time, no giant response in memory.
+    - Async: `SubmitParse` enqueues a parse task and returns a `task_id`
+    immediately; the caller polls `GetResult` for status and (when done)
+    the chunks. Heavy parsing runs in a separate worker pool (Celery).
     - `source` is a uniform URI; the scheme selects the storage backend, the
     remainder is the location within that backend.
     - The request carries only *location* (doc_id + source). Connection config
@@ -95,7 +118,7 @@ class ParseService:
     """
 
     @staticmethod
-    def Parse(request,
+    def SubmitParse(request,
             target,
             options=(),
             channel_credentials=None,
@@ -105,12 +128,39 @@ class ParseService:
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_stream(
+        return grpc.experimental.unary_unary(
             request,
             target,
-            '/parse.v1.ParseService/Parse',
+            '/parse.v1.ParseService/SubmitParse',
             parse__pb2.ParseRequest.SerializeToString,
-            parse__pb2.ParseResponse.FromString,
+            parse__pb2.SubmitParseResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetResult(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/parse.v1.ParseService/GetResult',
+            parse__pb2.GetResultRequest.SerializeToString,
+            parse__pb2.GetResultResponse.FromString,
             options,
             channel_credentials,
             insecure,

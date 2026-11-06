@@ -2,17 +2,21 @@ syntax = "proto3";
 
 package parse.v1;
 
-// py-parser's external service contract (gRPC server-streaming).
+// py-parser's external service contract (gRPC, async task model).
 //
 // Design points:
-//   - server-streaming: chunks are pushed one at a time, no giant response in memory.
+//   - Async: `SubmitParse` enqueues a parse task and returns a `task_id`
+//     immediately; the caller polls `GetResult` for status and (when done)
+//     the chunks. Heavy parsing runs in a separate worker pool (Celery).
 //   - `source` is a uniform URI; the scheme selects the storage backend, the
 //     remainder is the location within that backend.
 //   - The request carries only *location* (doc_id + source). Connection config
 //     (endpoints / credentials) lives in the config center, never in the request.
 service ParseService {
-  // Parse a document, streaming chunks one by one, then a final `done` summary.
-  rpc Parse(ParseRequest) returns (stream ParseResponse);
+  // Enqueue a parse task. Returns immediately with a task_id for polling.
+  rpc SubmitParse(ParseRequest) returns (SubmitParseResponse);
+  // Poll task status and (once SUCCESS) fetch the parsed chunks.
+  rpc GetResult(GetResultRequest) returns (GetResultResponse);
 }
 
 message ParseRequest {
@@ -23,12 +27,31 @@ message ParseRequest {
   string source = 2;
 }
 
-// Two message kinds in the stream: many chunks, then one summary.
-message ParseResponse {
-  oneof payload {
-    ParseChunk chunk = 1;   // pushed repeatedly
-    ParseResult done = 2;   // sent once at end of stream
-  }
+message SubmitParseResponse {
+  string task_id = 1;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_SUCCESS = 3;
+  TASK_STATUS_FAILED = 4;
+}
+
+message GetResultRequest {
+  string task_id = 1;
+}
+
+message GetResultResponse {
+  string task_id = 1;
+  TaskStatus status = 2;
+  // Set only when status == FAILED.
+  string error = 3;
+  // Set only when status == SUCCESS: the summary (chunk_count + doc_meta).
+  ParseResult result = 4;
+  // Set only when status == SUCCESS: the parsed chunks.
+  repeated ParseChunk chunks = 5;
 }
 
 message ParseChunk {

@@ -1,19 +1,34 @@
-# MinerU 解析服务 —— 本地 Docker 部署
+# MinerU 解析服务 + py-parse 异步解析栈 —— 本地 Docker 部署
 #
-# 供 py-parse 的 MineruClient 通过 http://localhost:8000 调用（见 py_parse/adapters/mineru_client.py）。
-#
-# 前提：
-#   - Linux 或 Windows WSL2（Docker 版 MinerU 不支持 macOS GPU 加速）
-#   - NVIDIA GPU（Volta+，建议 8GB+ 显存）+ NVIDIA Container Toolkit（nvidia-smi 在容器内可见）
-#   - 首次启动会下载模型权重（已切 ModelScope 国内源），之后由 mineru-cache 卷持久化
+# 服务拓扑：
+#   mineru-api   : 文档抽取（GPU，MinerU HTTP API，端口 8000）
+#   redis        : Celery broker + 任务状态热缓存
+#   postgres     : 任务结果持久化（tasks + chunks）
+#   celery-worker: 消费队列，跑 read→extract→chunk 重活
+#   py-parse     : gRPC 控制面（SubmitParse / GetResult），端口 50051
 #
 # 启动：  docker compose -f docker/compose.yaml up -d
-# 健康：  curl http://localhost:8000/health
-# 文档：  http://localhost:8000/docs
+# 健康：  curl http://localhost:8000/health        （mineru）
+#         docker compose exec redis redis-cli ping （redis）
+#         docker compose exec postgres pg_isready -U postgres
 #
-# 注：若 ghcr.io 预构建镜像不可用/版本不符，可从官方仓库自构建：
+# 注：若 ghcr.io 预构建镜像不可用/版本不符，可从官方仓库自构建 MinerU：
 #   git clone https://github.com/opendatalab/MinerU && cd MinerU/docker
 #   docker build -t mineru:latest .   # 再把下面的 image 改成 mineru:latest
+
+x-parse-env: &parse-env
+  MINERU_URL: http://mineru-api:8000   # compose 网络内访问 mineru
+  REDIS_URL: redis://redis:6379/0
+  POSTGRES_DSN: postgresql+psycopg://postgres:postgres@postgres:5432/pyparse
+  RESULT_TTL_SECONDS: "3600"
+  # 可选：启用 minio/s3 存储后端时取消注释并填入连接配置
+  # MINIO_ENDPOINT: minio:9000
+  # MINIO_ACCESS_KEY: ...
+  # MINIO_SECRET_KEY: ...
+  # S3_ENDPOINT_URL: http://minio:9000
+  # S3_REGION: us-east-1
+  # S3_ACCESS_KEY: ...
+  # S3_SECRET_KEY: ...
 
 services:
   mineru-api:
@@ -30,7 +45,7 @@ services:
       - mineru-cache:/app/cache      # 模型权重缓存（持久化，避免每次重建镜像都重下模型）
       - mineru-uploads:/app/uploads
       - mineru-logs:/app/logs
-    # --allow-public-http-client 允许非本机调用（py-parse 从宿主/其它容器访问时需要）
+    # --allow-public-http-client 允许非本机调用（py-parse 从其它容器访问时需要）
     command: mineru-api --host 0.0.0.0 --port 8000 --allow-public-http-client
     deploy:
       resources:
@@ -40,7 +55,58 @@ services:
               count: all
               capabilities: [gpu]
 
-  # py-parse：对外暴露 gRPC ParseService，文档抽取委托给上面的 mineru-api。
+  redis:
+    image: redis:7-alpine
+    container_name: py-parse-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: py-parse-postgres
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pyparse
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 异步解析 worker：消费 Redis 队列，跑 read→extract→chunk，写 Postgres + Redis
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: py-parse-worker
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mineru-api:
+        condition: service_started
+    environment:
+      <<: *parse-env
+      CELERY_WORKER_CONCURRENCY: "${CELERY_WORKER_CONCURRENCY:-2}"
+    command: celery -A py_parse.adapters.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+
+  # gRPC 控制面：对外暴露 SubmitParse / GetResult
   py-parse:
     build:
       context: ..
@@ -48,21 +114,16 @@ services:
     container_name: py-parse
     restart: always
     depends_on:
-      - mineru-api
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
       - "50051:50051"
     environment:
-      MINERU_URL: http://mineru-api:8000   # compose 网络内访问 mineru
+      <<: *parse-env
       GRPC_HOST: 0.0.0.0
       GRPC_PORT: "50051"
-      # 可选：启用 minio/s3 存储后端时取消注释并填入连接配置
-      # MINIO_ENDPOINT: minio:9000
-      # MINIO_ACCESS_KEY: ...
-      # MINIO_SECRET_KEY: ...
-      # S3_ENDPOINT_URL: http://minio:9000
-      # S3_REGION: us-east-1
-      # S3_ACCESS_KEY: ...
-      # S3_SECRET_KEY: ...
     healthcheck:
       # 用标准 gRPC health 服务探测（grpcio-health-checking 已在镜像内）
       test:
@@ -85,3 +146,5 @@ volumes:
   mineru-cache:
   mineru-uploads:
   mineru-logs:
+  redis-data:
+  pgdata:

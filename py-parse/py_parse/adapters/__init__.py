@@ -11,6 +11,7 @@ from .mineru_worker import MineruWorker
 from .minio_reader import MinioSourceReader
 from .registry import SourceReaderRegistry
 from .s3_reader import S3SourceReader
+from .stub_extractor import StubExtractor
 
 __all__ = [
     "FileSourceReader",
@@ -19,4 +20,5 @@ __all__ = [
     "MinioSourceReader",
     "S3SourceReader",
     "SourceReaderRegistry",
+    "StubExtractor",
 ]

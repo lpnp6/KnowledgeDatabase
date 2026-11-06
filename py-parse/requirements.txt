@@ -12,3 +12,9 @@ httpx>=0.27
 # Storage adapters (install only what you use)
 minio>=7.2
 boto3>=1.34
+
+# Async task infrastructure (Celery + Redis + PostgreSQL)
+celery>=5.3
+redis>=5.0
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
