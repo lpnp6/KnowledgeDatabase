@@ -1,37 +1,47 @@
-# MinerU 解析服务 —— 本地 Docker 部署
+# 全栈本地部署：MinerU 4.x 解析服务 + py-parse gRPC 服务
 #
-# 供 py-parse 的 MineruClient 通过 http://localhost:8000 调用（见 py_parse/adapters/mineru_client.py）。
+# 供 py-parse 的 MineruClient 通过 http://mineru-api:8000 调用（见 py_parse/adapters/mineru_client.py）。
 #
 # 前提：
 #   - Linux 或 Windows WSL2（Docker 版 MinerU 不支持 macOS GPU 加速）
-#   - NVIDIA GPU（Volta+，建议 8GB+ 显存）+ NVIDIA Container Toolkit（nvidia-smi 在容器内可见）
-#   - 首次启动会下载模型权重（已切 ModelScope 国内源），之后由 mineru-cache 卷持久化
+#   - NVIDIA GPU（Volta+，建议 8GB+ 显存）+ 可用的 GPU 透传
+#     （验证：docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi）
+#   - MinerU 官方不再发布预构建镜像，mineru-api 由本目录的 Dockerfile.mineru 构建，
+#     模型权重在构建时下载并打进镜像（镜像很大，首次构建耗时较久）
 #
-# 启动：  docker compose -f docker/compose.yaml up -d
-# 健康：  curl http://localhost:8000/health
-# 文档：  http://localhost:8000/docs
-#
-# 注：若 ghcr.io 预构建镜像不可用/版本不符，可从官方仓库自构建：
-#   git clone https://github.com/opendatalab/MinerU && cd MinerU/docker
-#   docker build -t mineru:latest .   # 再把下面的 image 改成 mineru:latest
+# 启动：  docker compose -f docker/compose.yaml up -d --build
+# 健康：  curl http://localhost:8000/v1/health
+# 文档：  https://opendatalab.github.io/MinerU/quick_start/docker_deployment/
+
+name: py-parse
 
 services:
   mineru-api:
-    image: ghcr.io/opendatalab/mineru-core:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.mineru
+    image: mineru:4
     container_name: mineru-api
     restart: always
     ports:
       - "8000:8000"
     environment:
-      MINERU_MODEL_SOURCE: modelscope   # 国内模型下载源；网络可达 HuggingFace 时可去掉
+      # 权重已打进镜像，运行期不再联网下载
+      MINERU_MODEL_SOURCE: local
       TZ: Asia/Shanghai
-      MAX_WORKERS: "4"
-    volumes:
-      - mineru-cache:/app/cache      # 模型权重缓存（持久化，避免每次重建镜像都重下模型）
-      - mineru-uploads:/app/uploads
-      - mineru-logs:/app/logs
-    # --allow-public-http-client 允许非本机调用（py-parse 从宿主/其它容器访问时需要）
-    command: mineru-api --host 0.0.0.0 --port 8000 --allow-public-http-client
+    entrypoint: ["mineru-kit"]
+    command:
+      - api-server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ipc: host
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/v1/health || exit 1"]
     deploy:
       resources:
         reservations:
@@ -80,8 +90,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 10s
-
-volumes:
-  mineru-cache:
-  mineru-uploads:
-  mineru-logs:
