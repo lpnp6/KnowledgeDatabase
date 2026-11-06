@@ -1,0 +1,57 @@
+# MinerU single-instance deployment — one card per service
+#
+# Runs a single mineru-api container bound to one GPU. On a multi-GPU machine,
+# deploy multiple instances distinguished by GPU_INDEX (each its own compose
+# project):
+#
+#   # GPU 0:
+#   GPU_INDEX=0 docker compose -f docker/compose.mineru.yaml -p mineru0 up -d
+#   # GPU 1:
+#   GPU_INDEX=1 docker compose -f docker/compose.mineru.yaml -p mineru1 up -d
+#
+# Prerequisites:
+#   - Linux (Docker MinerU does not support macOS GPU acceleration)
+#   - NVIDIA GPU (Volta+, 8GB+ VRAM) + NVIDIA Container Toolkit (nvidia-smi visible in container)
+#   - First start downloads model weights (ModelScope mirror); persisted by mineru-cache volume
+#
+# Verify: curl http://localhost:8000/health
+# Docs:   http://localhost:8000/docs
+#
+# Image note: the ghcr.io prebuilt image already bundles CUDA torch (no manual torch
+# install). If it is unavailable or you need to pin a version, build from source:
+#   git clone https://github.com/opendatalab/MinerU && cd MinerU/docker
+#   docker build -t mineru:latest .   # then change `image` below to mineru:latest
+
+services:
+  mineru-api:
+    image: ghcr.io/opendatalab/mineru-core:latest
+    container_name: mineru-api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      # one card per service: bind to a specific GPU (default 0; set per instance)
+      NVIDIA_VISIBLE_DEVICES: ${GPU_INDEX:-0}
+      # domestic model download source (drop if HuggingFace is reachable)
+      MINERU_MODEL_SOURCE: modelscope
+      TZ: Asia/Shanghai
+      # in-process concurrency lanes — the key to keeping the GPU busy (2~4 for a 12GB card)
+      MAX_WORKERS: ${MAX_WORKERS:-2}
+    volumes:
+      - mineru-cache:/app/cache      # model weights (persisted to avoid re-download)
+      - mineru-uploads:/app/uploads
+      - mineru-logs:/app/logs
+    # --allow-public-http-client permits non-local callers (py-parse from another container/host)
+    command: mineru-api --host 0.0.0.0 --port 8000 --allow-public-http-client
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1               # single GPU
+              capabilities: [gpu]
+
+volumes:
+  mineru-cache:
+  mineru-uploads:
+  mineru-logs:

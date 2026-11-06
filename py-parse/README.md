@@ -31,17 +31,32 @@ proto/
 ## MinerU service (prerequisite)
 
 py-parser does **not** bundle MinerU; it talks to a MinerU HTTP service.
-Local deployment via Docker:
+
+### Option 1: Docker
 
 ```bash
-# 1. Start MinerU (first run downloads models; needs NVIDIA GPU + Container Toolkit)
 docker compose -f docker/compose.yaml up -d
-
-# 2. Verify
 curl http://localhost:8000/health     # → ok
 ```
 
-See `docker/compose.yaml` for the full config (ports, model-cache volume, GPU).
+### Option 2: pip (bare metal)
+
+```bash
+# 1. Isolated env + GPU deps (see requirements-mineru.txt header for CUDA notes)
+python -m venv ~/mineru-env && source ~/mineru-env/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu118   # driver 535 → cu118
+pip install -r requirements-mineru.txt
+
+# 2. Confirm GPU is used (False = torch was installed as CPU build)
+python -c "import torch; print(torch.cuda.is_available())"
+
+# 3. Download models + start the API
+export MINERU_MODEL_SOURCE=modelscope
+mineru-models-download
+mineru-api --host 0.0.0.0 --port 8000
+```
+
+See `requirements-mineru.txt` and `docker/compose.yaml` for full details.
 
 ## Run the parser (end-to-end check)
 
