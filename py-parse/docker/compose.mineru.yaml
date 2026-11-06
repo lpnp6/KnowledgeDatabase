@@ -1,16 +1,21 @@
 # MinerU 4.x single-instance deployment — one card per service
 #
-# Builds and runs one mineru-kit api-server container bound to one GPU, exposing
-# the V1 HTTP API (`POST /v1/file_parse`) that py_parse's MineruClient calls.
+# Two containers per instance, both from the locally built `mineru:4` image:
+#   mineru-api        mineru-kit api-server  — GPU parsing engine, internal only,
+#                     serves the asynchronous Tasks API (/v1/tasks, /v1/health)
+#   mineru-file-parse mineru-kit file-parse-server — synchronous single-file
+#                     wrapper for `POST /v1/file_parse`, which is what
+#                     py_parse's MineruClient calls; published on API_PORT
+#
+# (In MinerU 4.1 the synchronous endpoint moved out of api-server into this
+# standalone wrapper — api-server returns 404 for /v1/file_parse.)
 #
 #   docker compose -f docker/compose.mineru.yaml up -d --build
 #
 # On a multi-GPU machine, deploy multiple instances distinguished by GPU_INDEX
 # and API_PORT (each its own compose project):
 #
-#   # GPU 0:
 #   GPU_INDEX=0 API_PORT=8000 docker compose -f docker/compose.mineru.yaml -p mineru0 up -d --build
-#   # GPU 1:
 #   GPU_INDEX=1 API_PORT=8001 docker compose -f docker/compose.mineru.yaml -p mineru1 up -d --build
 #
 # Prerequisites:
@@ -21,8 +26,9 @@
 #   - ~40GB free disk for the image + build cache; the first build downloads the
 #     vLLM base image and model weights, so it takes a while
 #
-# Verify: curl http://localhost:8000/v1/health
-# Docs:   https://opendatalab.github.io/MinerU/quick_start/docker_deployment/
+# Verify: curl http://localhost:8000/docs     (file-parse wrapper)
+#         curl http://localhost:8001/v1/health (engine, if ENGINE_DEBUG_PORT set)
+# Docs:   https://opendatalab.github.io/MinerU/usage/file_parse
 
 name: mineru
 
@@ -39,8 +45,9 @@ services:
     image: mineru:4
     container_name: mineru-api-${GPU_INDEX:-0}
     restart: always
-    ports:
-      - "${API_PORT:-8000}:8000"
+    # Expose the Tasks API on the host only for debugging
+    # ports:
+    #   - "${ENGINE_DEBUG_PORT:-8001}:8000"
     environment:
       # weights are baked into the image at build time
       MINERU_MODEL_SOURCE: local
@@ -65,3 +72,32 @@ services:
             - driver: nvidia
               device_ids: ["${GPU_INDEX:-0}"]   # one card per service
               capabilities: [gpu]
+
+  mineru-file-parse:
+    image: mineru:4
+    container_name: mineru-file-parse-${GPU_INDEX:-0}
+    restart: always
+    ports:
+      - "${API_PORT:-8000}:8003"
+    depends_on:
+      mineru-api:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    entrypoint: ["mineru-kit"]
+    command:
+      - file-parse-server
+      - --api-url
+      - http://mineru-api:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/docs || exit 1"]
+    volumes:
+      # recovery state (request_id → task_id); survives wrapper restarts
+      - mineru-file-parse-state:/root/.mineru
+
+volumes:
+  mineru-file-parse-state:

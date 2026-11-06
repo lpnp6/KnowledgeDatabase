@@ -1,10 +1,15 @@
 """Chunking over MinerU's `content_list`.
 
 MinerU already returns blocks in correct reading order, each carrying a `type`
-(text / image / table / equation / code / list), a `text_level` for headings
-(0/null = body, >0 = heading level), and a `page_idx`. This module groups body
-text under the nearest heading and packs it into target-size chunks; tables /
-code / captioned images become their own chunks.
+(text / image / chart / table / equation / code / list), a `text_level` for
+headings (0/null = body, >0 = heading level), and a `page_idx`. This module
+groups body text under the nearest heading and packs it into target-size
+chunks; tables / code / captioned images and charts become their own chunks.
+
+Captions (`captions: list[str]`) are the only payload for figures — image
+bytes live in the extractor's ZIP and are not retained here. Tables prefer
+`table_body` (original HTML with rowspan/colspan) and fall back to the
+extractor's flattened markdown.
 
 Rules:
   - primary unit: semantic paragraph;
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import html as _html
 import re
+from html.parser import HTMLParser
 
 from .models import Chunk, ChunkMetadata
 
@@ -160,19 +166,33 @@ def _make_chunk(
     )
 
 
-def _join_text(value) -> str:
-    """Coerce a scalar or list-of-str field (e.g. captions) into one string."""
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        return " ".join(str(v) for v in value if v)
-    return str(value)
+def _caption_text(block: dict) -> str:
+    """Join a block's caption(s), tolerating str / list[str] / list[dict]."""
+    for key in ("captions", "caption", "image_caption", "table_caption"):
+        raw = block.get(key)
+        if not raw:
+            continue
+        items = raw if isinstance(raw, list) else [raw]
+        parts: list[str] = []
+        for item in items:
+            if isinstance(item, dict):
+                item = item.get("content") or item.get("text") or ""
+            item = str(item).strip()
+            if item:
+                parts.append(item)
+        if parts:
+            return " ".join(parts)
+    return ""
 
 
 def _html_to_text(fragment: str) -> str:
     """Lightweight HTML→plain-text for `table_body`, keeping cell/row structure."""
     if not fragment:
         return ""
+    # Keep superscript/subscript information instead of gluing digits together
+    # (O(n<sup>2</sup>) → O(n^2), d<sub>k</sub> → d_k).
+    fragment = re.sub(r"(?is)<sup[^>]*>(.*?)</sup>", r"^\1", fragment)
+    fragment = re.sub(r"(?is)<sub[^>]*>(.*?)</sub>", r"_\1", fragment)
     fragment = re.sub(r"(?is)<(?:td|th)[^>]*>", " | ", fragment)
     fragment = re.sub(r"(?is)<(?:tr|/tr)[^>]*>", "\n", fragment)
     fragment = re.sub(r"(?is)<br\s*/?>", "\n", fragment)
@@ -181,6 +201,216 @@ def _html_to_text(fragment: str) -> str:
     fragment = re.sub(r"[ \t]+", " ", fragment)
     fragment = re.sub(r"\n[ \t]*\n+", "\n", fragment)
     return fragment.strip()
+
+
+class _TableParser(HTMLParser):
+    """Collect `<tr>/<td>/<th>` into rows of cells, keeping row/col spans."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[dict]] = []
+        self._row: list[dict] | None = None
+        self._cell: dict | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if tag == "tr":
+            self._close_row()
+            self._row = []
+        elif tag in ("td", "th"):
+            self._close_cell()
+            if self._row is None:
+                self._row = []
+            values = dict(attrs)
+            self._cell = {
+                "parts": [],
+                "rowspan": self._span(values.get("rowspan")),
+                "colspan": self._span(values.get("colspan")),
+            }
+        elif self._cell is not None:
+            if tag == "br":
+                self._cell["parts"].append(" ")
+            elif tag == "sup":
+                self._cell["parts"].append("^")
+            elif tag == "sub":
+                self._cell["parts"].append("_")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("td", "th"):
+            self._close_cell()
+        elif tag == "tr":
+            self._close_row()
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell["parts"].append(data)
+
+    def close(self) -> None:
+        super().close()
+        self._close_cell()
+        self._close_row()
+
+    @staticmethod
+    def _span(value) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 1
+
+    def _close_cell(self) -> None:
+        if self._cell is None:
+            return
+        text = re.sub(r"\s+", " ", "".join(self._cell["parts"])).strip()
+        assert self._row is not None
+        self._row.append(
+            {
+                "text": text,
+                "rowspan": self._cell["rowspan"],
+                "colspan": self._cell["colspan"],
+            }
+        )
+        self._cell = None
+
+    def _close_row(self) -> None:
+        if self._row:
+            self.rows.append(self._row)
+        self._row = None
+
+
+def _expand_spans(rows: list[list[dict]]) -> list[list[str]]:
+    """Expand rowspan/colspan into a rectangular grid, repeating spanned text.
+
+    Repeating the value (rather than leaving blanks) is what keeps grouped rows
+    readable after flattening — e.g. Table 3's "(A)" rowspan=4 labels all four
+    of its rows.
+    """
+    grid: list[list[str]] = []
+    carry: dict[int, tuple[int, str]] = {}  # col -> (rows still covered, text)
+    for cells in rows:
+        row: list[str] = []
+        col = 0
+        pending = None
+        while True:
+            if col in carry:
+                left, text = carry[col]
+                row.append(text)
+                if left <= 1:
+                    del carry[col]
+                else:
+                    carry[col] = (left - 1, text)
+                col += 1
+                continue
+            if pending is None:
+                pending = cells.pop(0) if cells else None
+                if pending is None:
+                    ahead = [c for c in carry if c >= col]
+                    if not ahead:
+                        break
+                    col = min(ahead)
+                    continue
+            span = pending["colspan"]
+            for k in range(span):
+                row.append(pending["text"])
+                if pending["rowspan"] > 1:
+                    carry[col + k] = (pending["rowspan"] - 1, pending["text"])
+            col += span
+            pending = None
+        grid.append(row)
+
+    width = max((len(r) for r in grid), default=0)
+    for row in grid:
+        row.extend([""] * (width - len(row)))
+    return grid
+
+
+def _md_cell(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().replace("|", "\\|")
+
+
+def _html_table_to_markdown(fragment: str) -> str:
+    """Render an HTML table as markdown with qualified, multi-level headers.
+
+    A two-row header (`BLEU` spanning `EN-DE`/`EN-FR`) becomes one flat header
+    row whose cells read `BLEU / EN-DE`; without this the column semantics are
+    lost and numbers get attributed to the wrong column.
+    """
+    if not fragment or "<tr" not in fragment.lower():
+        return ""
+    parser = _TableParser()
+    parser.feed(fragment)
+    parser.close()
+    rows = [row for row in parser.rows if row]
+    if not rows:
+        return ""
+
+    # Header rows: the first row, plus a second one when the first row carries
+    # a colspan (that is the signature of a two-level header).
+    header_rows = 1
+    if len(rows) > 1 and any(cell["colspan"] > 1 for cell in rows[0]):
+        header_rows = 2
+
+    grid = _expand_spans(rows)
+    if not grid:
+        return ""
+    width = len(grid[0])
+    header_rows = min(header_rows, len(grid))
+
+    headers: list[str] = []
+    for col in range(width):
+        parts: list[str] = []
+        for r in range(header_rows):
+            value = _md_cell(grid[r][col])
+            if value and (not parts or parts[-1] != value):
+                parts.append(value)
+        headers.append(" / ".join(parts))
+
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in grid[header_rows:]:
+        lines.append("| " + " | ".join(_md_cell(cell) for cell in row) + " |")
+    return "\n".join(lines)
+
+
+_TABLE_CAPTION_LABEL = re.compile(r"Table\s+(\d+)\s*:")
+
+
+def _replace_heading(chunk: Chunk, new_heading: str) -> None:
+    """Rewrite the heading both in metadata and in the prepended text."""
+    old = chunk.metadata.heading
+    body = chunk.text[len(old) + 2:] if old else chunk.text
+    chunk.text = f"{new_heading}\n\n{body}" if new_heading else body
+    chunk.metadata.heading = new_heading
+
+
+def _retarget_table_headings(chunks: list[Chunk]) -> None:
+    """Re-home floated tables under the section that actually references them.
+
+    Tables are laid out at the top of a page in the PDF, so sequential heading
+    tracking attributes them to whatever section preceded them. The caption
+    carries the table number; the nearest *body* chunk mentioning that number
+    names the owning section.
+    """
+    for i, chunk in enumerate(chunks):
+        if chunk.metadata.chunk_type != "table":
+            continue
+        label = _TABLE_CAPTION_LABEL.search(chunk.text)
+        if not label:
+            continue
+        mention = re.compile(rf"\bTable\s+{label.group(1)}\b")
+        best: tuple[int, str] | None = None
+        for j, other in enumerate(chunks):
+            if j == i or other.metadata.chunk_type != "text":
+                continue
+            if not mention.search(other.text):
+                continue
+            distance = abs(j - i)
+            if best is None or distance < best[0]:
+                best = (distance, other.metadata.heading)
+        if best and best[1] and best[1] != chunk.metadata.heading:
+            _replace_heading(chunk, best[1])
 
 
 def _clean_latex(text: str) -> str:
@@ -239,15 +469,21 @@ def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
 
         elif btype == "table":
             flush_body()
-            caption = _join_text(block.get("table_caption") or block.get("caption"))
-            body_text = _html_to_text(block.get("table_body") or block.get("content") or "")
-            content = "\n".join(p for p in (caption, body_text) if p)
+            caption = _caption_text(block)
+            html = block.get("table_body") or ""
+            body_text = (
+                _html_table_to_markdown(html)
+                or _html_to_text(block.get("content") or "")
+            )
+            content = "\n\n".join(p for p in (caption, body_text) if p)
             if content:
                 chunks.append(_make_chunk(current_heading, content, "table", page, doc_id, idx))
                 idx += 1
 
-        elif btype == "image":
-            caption = _join_text(block.get("image_caption") or block.get("caption"))
+        elif btype in ("image", "chart"):
+            # Captions are the only figure payload worth embedding; charts are
+            # figures too (MinerU labels plots `chart`), so they share the type.
+            caption = _caption_text(block)
             if caption:
                 flush_body()
                 chunks.append(_make_chunk(current_heading, caption, "image", page, doc_id, idx))
@@ -265,7 +501,10 @@ def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
 
         else:
             # body text: "text", "list", "equation", and anything unrecognised
-            body.append((_clean_inline(block.get("content", "") or ""), page))
+            text = _clean_inline(block.get("content", "") or "")
+            if text.strip():
+                body.append((text, page))
 
     flush_body()
+    _retarget_table_headings(chunks)
     return chunks

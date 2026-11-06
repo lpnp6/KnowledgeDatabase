@@ -1,6 +1,8 @@
 # 全栈本地部署：MinerU 4.x 解析服务 + py-parse gRPC 服务
 #
-# 供 py-parse 的 MineruClient 通过 http://mineru-api:8000 调用（见 py_parse/adapters/mineru_client.py）。
+# 供 py-parse 的 MineruClient 通过 http://mineru-file-parse:8003 调用
+# （见 py_parse/adapters/mineru_client.py）。MinerU 4.1 的同步接口
+# /v1/file_parse 由独立的 file-parse-server 提供，api-server 只提供异步 Tasks API。
 #
 # 前提：
 #   - Linux 或 Windows WSL2（Docker 版 MinerU 不支持 macOS GPU 加速）
@@ -10,8 +12,8 @@
 #     模型权重在构建时下载并打进镜像（镜像很大，首次构建耗时较久）
 #
 # 启动：  docker compose -f docker/compose.yaml up -d --build
-# 健康：  curl http://localhost:8000/v1/health
-# 文档：  https://opendatalab.github.io/MinerU/quick_start/docker_deployment/
+# 健康：  curl http://localhost:8000/docs     （file-parse 包装层）
+# 文档：  https://opendatalab.github.io/MinerU/usage/file_parse
 
 name: py-parse
 
@@ -23,8 +25,6 @@ services:
     image: mineru:4
     container_name: mineru-api
     restart: always
-    ports:
-      - "8000:8000"
     environment:
       # 权重已打进镜像，运行期不再联网下载
       MINERU_MODEL_SOURCE: local
@@ -50,7 +50,33 @@ services:
               count: all
               capabilities: [gpu]
 
-  # py-parse：对外暴露 gRPC ParseService，文档抽取委托给上面的 mineru-api。
+  # 同步单文件解析包装层：对外暴露 /v1/file_parse（MineruClient 调的就是它）
+  mineru-file-parse:
+    image: mineru:4
+    container_name: mineru-file-parse
+    restart: always
+    ports:
+      - "8000:8003"
+    depends_on:
+      mineru-api:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    entrypoint: ["mineru-kit"]
+    command:
+      - file-parse-server
+      - --api-url
+      - http://mineru-api:8000
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/docs || exit 1"]
+    volumes:
+      - mineru-file-parse-state:/root/.mineru
+
+  # py-parse：对外暴露 gRPC ParseService，文档抽取委托给上面的 file-parse 包装层。
   py-parse:
     build:
       context: ..
@@ -58,11 +84,11 @@ services:
     container_name: py-parse
     restart: always
     depends_on:
-      - mineru-api
+      - mineru-file-parse
     ports:
       - "50051:50051"
     environment:
-      MINERU_URL: http://mineru-api:8000   # compose 网络内访问 mineru
+      MINERU_URL: http://mineru-file-parse:8003   # compose 网络内访问 mineru
       GRPC_HOST: 0.0.0.0
       GRPC_PORT: "50051"
       # 可选：启用 minio/s3 存储后端时取消注释并填入连接配置
@@ -90,3 +116,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 10s
+
+volumes:
+  # file-parse 的恢复状态（request_id → task_id），重启后仍可查询
+  mineru-file-parse-state:
