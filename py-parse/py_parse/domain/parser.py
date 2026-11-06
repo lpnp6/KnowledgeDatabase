@@ -1,99 +1,47 @@
-"""Document parser orchestrator: render → ML layout → group → chunk.
+"""Document parser orchestrator: read → extract → chunk.
 
-Renders PDF pages, runs the LayoutAnalyzer (ML) in parallel, groups content
-under the nearest title (no heading hierarchy), and chunks. Page-level results
-can be cached for checkpoint/resume — important for hundreds-of-pages scanned
-documents.
+Reads the raw document bytes, delegates structured extraction to a
+`DocumentExtractor` (e.g. a local MinerU service), then chunks the resulting
+`content_list`. Reading order and heading detection are owned by the extractor,
+not re-derived here — this is what removes the old bbox-sort / figure-title
+misattribution problems.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from typing import BinaryIO, Optional, Protocol
+from typing import BinaryIO
 
-import pymupdf
-
-from ..ports.layout_analyzer import LayoutAnalyzer, PageElement
-from .chunker import chunk_group
+from ..ports.document_extractor import DocumentExtractor
+from .chunker import chunk_content_list
 from .models import Chunk, DocMeta, ParseOutput
 
 
-class PageCache(Protocol):
-    """Checkpoint/resume: cache analyzed pages by (doc_id, page_index)."""
-
-    def get(self, doc_id: str, page_index: int) -> Optional[list[PageElement]]: ...
-
-    def put(self, doc_id: str, page_index: int, elements: list[PageElement]) -> None: ...
-
-
 class DocumentParser:
-    def __init__(
-        self,
-        analyzer: LayoutAnalyzer,
-        page_cache: Optional[PageCache] = None,
-        dpi: int = 200,
-        workers: int = 4,
-    ) -> None:
-        self._analyzer = analyzer
-        self._page_cache = page_cache
-        self._dpi = dpi
-        self._workers = workers
+    def __init__(self, extractor: DocumentExtractor) -> None:
+        self._extractor = extractor
 
     def parse(self, pdf_stream: BinaryIO, doc_id: str) -> ParseOutput:
         pdf_bytes = pdf_stream.read()
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-        total_pages = len(doc)
 
-        # 1. Analyze pages in parallel (with optional checkpoint cache).
-        def analyze(i: int) -> list[PageElement]:
-            if self._page_cache is not None:
-                cached = self._page_cache.get(doc_id, i)
-                if cached is not None:
-                    return cached
-            elems = self._analyze_page(doc[i], i)
-            if self._page_cache is not None:
-                self._page_cache.put(doc_id, i, elems)
-            return elems
+        content_list = self._extractor.extract(pdf_bytes)
 
-        with ThreadPoolExecutor(max_workers=self._workers) as pool:
-            page_elements = list(pool.map(analyze, range(total_pages)))
+        chunks: list[Chunk] = chunk_content_list(content_list, doc_id)
 
-        # 2. Flatten in reading order (pages ordered; elements sorted within page).
-        elements: list[PageElement] = [e for page in page_elements for e in page]
+        total_pages = max(
+            (int(b.get("page_idx", 0)) for b in content_list),
+            default=0,
+        ) + 1
 
-        # 3. Group under nearest title, then chunk.
-        chunks = self._chunk_document(elements, doc_id)
+        return ParseOutput(
+            doc_meta=DocMeta(total_pages=total_pages, title=self._extract_title(content_list)),
+            chunks=chunks,
+        )
 
-        return ParseOutput(doc_meta=DocMeta(total_pages=total_pages), chunks=chunks)
-
-    def _analyze_page(self, page, page_index: int) -> list[PageElement]:
-        pix = page.get_pixmap(dpi=self._dpi)
-        img_bytes = pix.tobytes("png")
-        elems = self._analyzer.analyze(img_bytes, page_index)
-        # Reading order: top-to-bottom, then left-to-right.
-        elems.sort(key=lambda e: (e.bbox[1], e.bbox[0]))
-        return elems
-
-    def _chunk_document(self, elements: list[PageElement], doc_id: str) -> list[Chunk]:
-        chunks: list[Chunk] = []
-        idx = 0
-        current_heading = ""
-        current_elems: list[PageElement] = []
-
-        def flush() -> None:
-            nonlocal current_elems, idx
-            if not current_elems:
-                return
-            group = chunk_group(current_heading, current_elems, doc_id, idx)
-            chunks.extend(group)
-            idx += len(group)
-            current_elems = []
-
-        for elem in elements:
-            if elem.element_type == "title":
-                flush()
-                current_heading = elem.text
-            elif elem.element_type in ("text", "table"):
-                current_elems.append(elem)
-
-        flush()
-        return chunks
+    @staticmethod
+    def _extract_title(content_list: list[dict]) -> str:
+        """Best-effort document title = the first level-1 heading."""
+        for block in content_list:
+            if block.get("type") == "text" and block.get("text_level") == 1:
+                text = block.get("text") or ""
+                if text.strip():
+                    return text.strip()
+        return ""

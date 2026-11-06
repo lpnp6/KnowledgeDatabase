@@ -1,98 +1,55 @@
 #!/usr/bin/env python
-"""Validate layout detection + chunking on a real scanned document.
+"""Validate extraction + chunking against a local MinerU service.
+
+Prerequisite: a `mineru-api` service running locally (see README), e.g.
+    mineru-api --host 0.0.0.0 --port 8000
 
 Run from the py-parse/ directory:
-    python scripts/test_parse.py /path/to/doc.pdf --max-pages 10
+    python scripts/test_parse.py /path/to/doc.pdf --doc-id sample --output-dir out
 
 Single-pass report to eyeball two quality points:
-  1. Detection: does PP-Structure correctly find titles / text / tables?
-  2. Chunking:  are chunks 200–500 tokens with the nearest title prepended?
+  1. Extraction: does MinerU return a well-ordered content_list (types/headings)?
+  2. Chunking:  are chunks 200–500 tokens with the nearest heading prepended?
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sys
-import time
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
+from sys import path as _sys_path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_sys_path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import pymupdf  # noqa: E402
-
-from py_parse.adapters.paddle_structure_analyzer import PaddleStructureAnalyzer  # noqa: E402
-from py_parse.domain.chunker import chunk_group, estimate_tokens  # noqa: E402
+from py_parse.adapters.mineru_client import MineruClient  # noqa: E402
+from py_parse.domain.chunker import chunk_content_list, estimate_tokens  # noqa: E402
 from py_parse.domain.models import Chunk  # noqa: E402
-from py_parse.ports.layout_analyzer import PageElement  # noqa: E402
 
 
-def analyze(analyzer, pdf_path: str, dpi: int, max_pages: int):
-    """Render + analyze pages in a single pass; return elements + timings."""
-    doc = pymupdf.open(pdf_path)
-    n = min(len(doc), max_pages) if max_pages else len(doc)
-    elements: list[PageElement] = []
-    timings: list[float] = []
-    for i in range(n):
-        pix = doc[i].get_pixmap(dpi=dpi)
-        img = pix.tobytes("png")
-        t0 = time.time()
-        page_elems = analyzer.analyze(img, i)
-        dt = time.time() - t0
-        timings.append(dt)
-        page_elems.sort(key=lambda e: (e.bbox[1], e.bbox[0]))  # top-to-bottom
-        elements.extend(page_elems)
-        # per-page progress (flush so it prints even while thrashing)
-        print(f"  [page {i+1}/{n}] {dt:.1f}s  elements={len(page_elems)}", flush=True)
-    return elements, timings, n
+def read_bytes(pdf_path: str) -> bytes:
+    with open(pdf_path, "rb") as f:
+        return f.read()
 
 
-def group_and_chunk(elements: list[PageElement], doc_id: str) -> list[Chunk]:
-    """Group content under nearest title, then chunk (mirrors the parser)."""
-    chunks: list[Chunk] = []
-    idx = 0
-    heading = ""
-    group: list[PageElement] = []
-
-    def flush() -> None:
-        nonlocal group, idx
-        if group:
-            made = chunk_group(heading, group, doc_id, idx)
-            chunks.extend(made)
-            idx += len(made)
-            group = []
-
-    for e in elements:
-        if e.element_type == "title":
-            flush()
-            heading = e.text
-        elif e.element_type in ("text", "table"):
-            group.append(e)
-    flush()
-    return chunks
-
-
-def report_detection(elements, timings, n) -> None:
+def report_extraction(content_list: list[dict]) -> None:
     print("=" * 64)
-    print("1) DETECTION  (what PP-Structure found)")
+    print("1) EXTRACTION  (what MinerU returned)")
     print("=" * 64)
-    counts = Counter(e.element_type for e in elements)
+    counts = Counter(b.get("type", "text") for b in content_list)
     total = sum(counts.values())
     for kind in sorted(counts):
         print(f"  {kind:10s} {counts[kind]:6d}  ({counts[kind]/total*100:.1f}%)")
-    print(f"\n  pages: {n}   avg {sum(timings)/n:.2f} s/page")
+    print(f"\n  blocks: {total}")
 
-    titles = [e.text for e in elements if e.element_type == "title"]
-    print(f"\n  detected titles ({len(titles)}):")
-    for t in titles[:25]:
-        print(f"    - {t[:70]}")
-
-    # Red flag: pages with no text elements (OCR failure / blank page).
-    per_page = Counter(e.page for e in elements if e.element_type in ("text", "title", "table"))
-    empty = [p for p in range(n) if per_page[p] == 0]
-    if empty:
-        print(f"\n  [WARN] pages with no text: {empty[:20]}")
+    headings = [
+        b.get("text", "")
+        for b in content_list
+        if b.get("type") == "text" and b.get("text_level") is not None and b.get("text_level") > 0
+    ]
+    print(f"\n  detected headings ({len(headings)}):")
+    for h in headings[:25]:
+        print(f"    - {h[:70]}")
 
 
 def report_chunking(chunks: list[Chunk]) -> None:
@@ -118,7 +75,6 @@ def report_chunking(chunks: list[Chunk]) -> None:
 
 
 def save_chunks(chunks: list[Chunk], output_dir: str, doc_id: str) -> Path:
-    """Persist chunks as JSONL to {output_dir}/{doc_id}.jsonl."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{doc_id}.jsonl"
@@ -130,18 +86,17 @@ def save_chunks(chunks: list[Chunk], output_dir: str, doc_id: str) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("pdf", help="path to a scanned PDF")
-    ap.add_argument("--dpi", type=int, default=200)
-    ap.add_argument("--max-pages", type=int, default=0, help="limit pages for a quick test (0 = all)")
+    ap.add_argument("pdf", help="path to a PDF document")
     ap.add_argument("--doc-id", default="sample")
+    ap.add_argument("--mineru-url", default="http://localhost:8000", help="local mineru-api base URL")
     ap.add_argument("--output-dir", default=None, help="directory to persist chunks as JSONL")
     args = ap.parse_args()
 
-    analyzer = PaddleStructureAnalyzer()
-    elements, timings, n = analyze(analyzer, args.pdf, args.dpi, args.max_pages)
-    report_detection(elements, timings, n)
+    client = MineruClient(base_url=args.mineru_url)
+    content_list = client.extract(read_bytes(args.pdf))
+    report_extraction(content_list)
 
-    chunks = group_and_chunk(elements, args.doc_id)
+    chunks = chunk_content_list(content_list, args.doc_id)
     report_chunking(chunks)
 
     if args.output_dir:

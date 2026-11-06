@@ -1,39 +1,53 @@
-"""Chunking strategy.
+"""Chunking over MinerU's `content_list`.
 
-Rules (as agreed):
+MinerU already returns blocks in correct reading order, each carrying a `type`
+(text / image / table / equation / code / list), a `text_level` for headings
+(0/null = body, >0 = heading level), and a `page_idx`. This module groups body
+text under the nearest heading and packs it into target-size chunks; tables /
+code / captioned images become their own chunks.
+
+Rules:
   - primary unit: semantic paragraph;
-  - target size: 200–500 tokens (~420–1050 Chinese chars, ~2.1 chars/token);
-  - minimum: ~100 tokens — fragments below this are merged upward, never emitted
-    as tiny chunks (fixed special-token overhead would dominate);
-  - overlap: 10–15% between adjacent chunks;
-  - the nearest title (heading) is prepended to each chunk's text so the
-    embedding captures "what section this is about".
-
-Heading detection is done by the ML layout engine (PP-Structure); this module
-only chunks content that has already been grouped under a nearest title.
+  - target size: 200–500 tokens;
+  - minimum: ~100 tokens — fragments below this are merged upward;
+  - overlap: 10–15% between adjacent text chunks, aligned to sentence boundaries;
+  - the nearest heading is prepended to each chunk's text.
 """
 from __future__ import annotations
 
+import html as _html
 import re
 
-from ..ports.layout_analyzer import PageElement
 from .models import Chunk, ChunkMetadata
 
-CHARS_PER_TOKEN = 2.1
-MIN_TOKENS = 100  # ~210 chars; below this, merge
-MAX_TOKENS = 500  # ~1050 chars; above this, split
+# Token budget (adaptive per language — see estimate_tokens).
+MIN_TOKENS = 100  # ~210 CJK chars / ~400 latin chars; below this, merge
+MAX_TOKENS = 500
 OVERLAP_RATIO = 0.12  # 10–15%
 
-_SENTENCE_END = re.compile(r"[。！？!?；;]")
+_CJK_CHARS_PER_TOKEN = 2.1
+_LATIN_CHARS_PER_TOKEN = 4.0
+
+# Sentence enders: CJK + ASCII punctuation, plus the English full stop and
+# newline (previously missing — the source of mid-word splits on English text).
+_SENTENCE_END = re.compile(r"[。！？!?；;.\n]")
+
+_CJK = re.compile(r"[一-鿿]")
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate for Chinese text (~2.1 chars/token)."""
-    return max(1, int(len(text) / CHARS_PER_TOKEN))
+    """Token estimate adapted to the dominant script (CJK ~2.1 chars/token,
+    latin ~4 chars/token)."""
+    if not text:
+        return 0
+    cjk_count = len(_CJK.findall(text))
+    ratio = cjk_count / len(text)
+    chars_per_token = _CJK_CHARS_PER_TOKEN if ratio > 0.3 else _LATIN_CHARS_PER_TOKEN
+    return max(1, int(len(text) / chars_per_token))
 
 
 def split_sentences(text: str) -> list[str]:
-    """Split into sentence chunks, keeping ending punctuation."""
+    """Split into sentences, keeping ending punctuation."""
     sentences: list[str] = []
     start = 0
     for m in _SENTENCE_END.finditer(text):
@@ -59,8 +73,26 @@ def split_long_paragraph(paragraph: str) -> list[str]:
     return pieces
 
 
+def _overlap_tail(prev_text: str, ratio: float) -> str:
+    """Return a trailing slice of `prev_text` (~ratio of its length), cut at a
+    sentence boundary so overlap never starts mid-word."""
+    if not prev_text:
+        return ""
+    target = int(len(prev_text) * ratio)
+    sentences = split_sentences(prev_text)
+    tail: list[str] = []
+    acc = 0
+    for s in reversed(sentences):
+        if acc + len(s) > target and acc > 0:
+            break
+        tail.append(s)
+        acc += len(s)
+    return "".join(reversed(tail))
+
+
 def assemble_content(paragraphs: list[str]) -> list[str]:
-    """Assemble paragraphs into target-size content strings (no heading yet)."""
+    """Pack paragraphs into target-size content strings, with sentence-aligned
+    overlap between adjacent chunks."""
     # 1. Split oversized paragraphs.
     pieces: list[str] = []
     for para in paragraphs:
@@ -70,36 +102,35 @@ def assemble_content(paragraphs: list[str]) -> list[str]:
             pieces.append(para)
 
     # 2. Pack into target-size chunks.
-    chunks: list[str] = []
+    packed: list[str] = []
     current: list[str] = []
     current_tokens = 0
     for piece in pieces:
         pt = estimate_tokens(piece)
         if current and current_tokens + pt > MAX_TOKENS:
-            chunks.append("".join(current))
+            packed.append("".join(current))
             current = []
             current_tokens = 0
         current.append(piece)
         current_tokens += pt
     if current:
-        chunks.append("".join(current))
+        packed.append("".join(current))
 
     # 3. Merge undersized chunks upward (avoid tiny fragments).
     merged: list[str] = []
-    for c in chunks:
+    for c in packed:
         if merged and estimate_tokens(c) < MIN_TOKENS:
             merged[-1] += c
         else:
             merged.append(c)
 
-    # 4. Apply overlap: prepend tail of previous chunk.
+    # 4. Apply sentence-aligned overlap: prepend tail of previous chunk.
     result: list[str] = []
     for i, c in enumerate(merged):
         if i == 0:
             result.append(c)
         else:
-            overlap_len = int(len(merged[i - 1]) * OVERLAP_RATIO)
-            result.append(merged[i - 1][-overlap_len:] + c)
+            result.append(_overlap_tail(merged[i - 1], OVERLAP_RATIO) + c)
     return result
 
 
@@ -114,26 +145,92 @@ def _make_chunk(
     )
 
 
-def chunk_group(
-    heading: str, elements: list[PageElement], doc_id: str, start_idx: int
-) -> list[Chunk]:
-    """Chunk content grouped under one nearest title.
+def _join_text(value) -> str:
+    """Coerce a scalar or list-of-str field (e.g. captions) into one string."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return " ".join(str(v) for v in value if v)
+    return str(value)
 
-    Text elements are packed into text chunks; each table becomes its own
-    chunk (overlap does not apply to tables).
+
+def _html_to_text(fragment: str) -> str:
+    """Lightweight HTML→plain-text for `table_body`, keeping cell/row structure."""
+    if not fragment:
+        return ""
+    fragment = re.sub(r"(?is)<(?:td|th)[^>]*>", " | ", fragment)
+    fragment = re.sub(r"(?is)<(?:tr|/tr)[^>]*>", "\n", fragment)
+    fragment = re.sub(r"(?is)<br\s*/?>", "\n", fragment)
+    fragment = re.sub(r"(?is)<[^>]+>", "", fragment)
+    fragment = _html.unescape(fragment)
+    fragment = re.sub(r"[ \t]+", " ", fragment)
+    fragment = re.sub(r"\n[ \t]*\n+", "\n", fragment)
+    return fragment.strip()
+
+
+def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
+    """Chunk a MinerU `content_list` into `Chunk` objects.
+
+    Blocks are assumed to already be in reading order. Text with `text_level`
+    > 0 sets the current heading; body text (and lists/equations) accumulate
+    and get packed; tables / code / captioned images become dedicated chunks.
     """
-    page = elements[0].page if elements else 0
-    idx = start_idx
     chunks: list[Chunk] = []
+    idx = 0
+    current_heading = ""
+    body: list[tuple[str, int]] = []  # (text, page)
 
-    paragraphs = [e.text for e in elements if e.element_type == "text"]
-    for content in assemble_content(paragraphs):
-        chunks.append(_make_chunk(heading, content, "text", page, doc_id, idx))
-        idx += 1
-
-    for table in elements:
-        if table.element_type == "table":
-            chunks.append(_make_chunk(heading, table.text, "table", table.page, doc_id, idx))
+    def flush_body() -> None:
+        nonlocal idx, body
+        if not body:
+            return
+        page = body[0][1]
+        paragraphs = [t for t, _ in body]
+        for content in assemble_content(paragraphs):
+            chunks.append(_make_chunk(current_heading, content, "text", page, doc_id, idx))
             idx += 1
+        body = []
 
+    for block in content_list:
+        btype = block.get("type", "text")
+        page = int(block.get("page_idx", 0))
+
+        if btype == "text":
+            level = block.get("text_level")
+            text = block.get("text", "") or ""
+            if level is not None and level > 0:
+                flush_body()
+                current_heading = text
+            else:
+                body.append((text, page))
+
+        elif btype in ("list", "equation"):
+            body.append((block.get("text", "") or "", page))
+
+        elif btype == "table":
+            flush_body()
+            caption = _join_text(block.get("table_caption"))
+            body_text = _html_to_text(block.get("table_body", "") or "")
+            content = "\n".join(p for p in (caption, body_text) if p)
+            if content:
+                chunks.append(_make_chunk(current_heading, content, "table", page, doc_id, idx))
+                idx += 1
+
+        elif btype == "image":
+            caption = _join_text(block.get("image_caption"))
+            if caption:
+                flush_body()
+                chunks.append(_make_chunk(current_heading, caption, "image", page, doc_id, idx))
+                idx += 1
+
+        elif btype == "code":
+            flush_body()
+            code = block.get("text", "") or ""
+            if code:
+                chunks.append(_make_chunk(current_heading, code, "code", page, doc_id, idx))
+                idx += 1
+
+        # unknown types are ignored
+
+    flush_body()
     return chunks

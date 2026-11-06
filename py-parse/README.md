@@ -3,30 +3,66 @@
 Enterprise document parsing service. Single responsibility: parse a document
 into structured chunks with metadata, streamed over gRPC server-streaming.
 
+Document extraction is delegated to **MinerU** (running as a separate HTTP
+service); this package owns the chunking logic and the gRPC contract.
+
 ## Structure (hexagonal architecture)
 
 ```
 py_parse/
-├── ports/               # Interfaces (dependency inversion)
-│   └── source_reader.py   # SourceReader: storage abstraction port
-├── adapters/            # Concrete implementations
-│   ├── file_reader.py     # file://  local filesystem
-│   ├── minio_reader.py    # minio:// local/remote MinIO
-│   ├── s3_reader.py       # s3://    remote S3-compatible
-│   └── registry.py        # scheme → adapter routing
-└── (domain/ core parsing logic — next step)
+├── ports/                 # Interfaces (dependency inversion)
+│   ├── source_reader.py     # SourceReader: storage abstraction
+│   └── document_extractor.py  # DocumentExtractor: PDF bytes → content_list
+├── adapters/              # Concrete implementations
+│   ├── mineru_client.py     # HTTP client over a local mineru-api service
+│   ├── file_reader.py       # file://  local filesystem
+│   ├── minio_reader.py      # minio://
+│   ├── s3_reader.py         # s3://
+│   └── registry.py          # scheme → reader routing
+├── domain/                # Core parsing logic (depends only on ports)
+│   ├── models.py            # Chunk / ChunkMetadata / DocMeta / ParseOutput
+│   ├── chunker.py           # content_list → chunks (heading grouping + packing)
+│   └── parser.py            # orchestrator: read → extract → chunk
+└── ...
 proto/
-└── parse.proto           # gRPC service contract
+└── parse.proto             # gRPC service contract
 ```
 
-## Storage abstraction (core design)
+## MinerU service (prerequisite)
+
+py-parser does **not** bundle MinerU; it talks to a MinerU HTTP service.
+Local deployment via Docker:
+
+```bash
+# 1. Start MinerU (first run downloads models; needs NVIDIA GPU + Container Toolkit)
+docker compose -f docker/compose.yaml up -d
+
+# 2. Verify
+curl http://localhost:8000/health     # → ok
+```
+
+See `docker/compose.yaml` for the full config (ports, model-cache volume, GPU).
+
+## Run the parser (end-to-end check)
+
+```bash
+python scripts/test_parse.py /path/to/doc.pdf \
+  --doc-id sample \
+  --mineru-url http://localhost:8000 \
+  --output-dir out
+```
+
+This prints an extraction report (block-type counts, detected headings), a
+chunking report (token distribution, samples), and persists chunks as JSONL to
+`out/sample.jsonl`.
+
+## Storage abstraction
 
 - `source` is a uniform URI: `file:///...` / `minio://...` / `s3://...`; the
   scheme selects the storage backend.
 - The request carries only location; connection config (endpoints,
   credentials) is injected at adapter construction time.
 - Adding a backend = write an adapter + `registry.register(scheme, reader)`.
-  The contract and parsing logic are unchanged.
 
 ## Generate gRPC code
 
@@ -41,15 +77,16 @@ python -m grpc_tools.protoc \
 ## Wiring example (for main)
 
 ```python
-from py_parse.adapters import (
-    FileSourceReader, MinioSourceReader, S3SourceReader, SourceReaderRegistry,
-)
+from py_parse.adapters import FileSourceReader, MineruClient, SourceReaderRegistry
+from py_parse.domain.parser import DocumentParser
+
+extractor = MineruClient(base_url="http://localhost:8000")
+parser = DocumentParser(extractor)
 
 registry = SourceReaderRegistry()
 registry.register("file", FileSourceReader())
-registry.register("minio", MinioSourceReader(minio_client))  # inject connection config
-registry.register("s3", S3SourceReader(s3_client))           # inject connection config
+# ...
 
-reader = registry.resolve("s3://my-bucket/doc_001.pdf")
-stream = reader.read("s3://my-bucket/doc_001.pdf")
+stream = registry.resolve("file:///data/docs/doc_001.pdf").read(...)
+out = parser.parse(stream, doc_id="doc_001")
 ```

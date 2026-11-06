@@ -3,15 +3,10 @@ grpcio>=1.60
 grpcio-tools>=1.60
 protobuf>=4.25
 
-# Document rendering / parsing
-PyMuPDF>=1.24
-
-# ML layout detection (scanned docs)
-# Use paddlepaddle-gpu with a CUDA-matched version when running on the 4060.
-paddlepaddle>=2.6
-paddleocr>=2.7
-opencv-python>=4.8
-numpy>=1.24
+# Document extraction — delegated to a locally deployed MinerU HTTP service
+# (mineru-api). This package only needs an HTTP client; MinerU and its model
+# weights / torch stack live in their own environment, separate from py-parse.
+httpx>=0.27
 
 # Storage adapters (install only what you use)
 minio>=7.2
