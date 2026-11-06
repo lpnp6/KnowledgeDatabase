@@ -31,15 +31,17 @@ class MineruClient(DocumentExtractor):
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._parse_path = parse_path
+        # One shared Client: thread-safe, reuses the connection pool across
+        # concurrent requests (the worker fans out many calls over this client).
+        self._client = httpx.Client(timeout=timeout)
 
     def extract(self, pdf_bytes: bytes) -> list[dict]:
         url = f"{self._base_url}{self._parse_path}"
         params = {"output_formats": "structured_content"}
         files = {"files": ("doc.pdf", pdf_bytes, "application/pdf")}
         try:
-            with httpx.Client(timeout=self._timeout) as client:
-                resp = client.post(url, params=params, files=files)
-                resp.raise_for_status()
+            resp = self._client.post(url, params=params, files=files)
+            resp.raise_for_status()
         except httpx.HTTPError as e:
             raise DocumentExtractError(f"mineru-api request failed: {e}") from e
 
@@ -48,10 +50,13 @@ class MineruClient(DocumentExtractor):
     def health(self) -> bool:
         """Best-effort liveness probe; returns False instead of raising."""
         try:
-            with httpx.Client(timeout=10.0) as client:
-                return client.get(f"{self._base_url}{_HEALTH_PATH}").is_success
+            return self._client.get(f"{self._base_url}{_HEALTH_PATH}").is_success
         except httpx.HTTPError:
             return False
+
+    def close(self) -> None:
+        """Release the underlying HTTP client (call when no longer needed)."""
+        self._client.close()
 
     @staticmethod
     def _flatten(payload: Any) -> list[dict]:

@@ -7,6 +7,7 @@ construction time, never in the request.
 
 from .file_reader import FileSourceReader
 from .mineru_client import MineruClient
+from .mineru_worker import MineruWorker
 from .minio_reader import MinioSourceReader
 from .registry import SourceReaderRegistry
 from .s3_reader import S3SourceReader
@@ -14,6 +15,7 @@ from .s3_reader import S3SourceReader
 __all__ = [
     "FileSourceReader",
     "MineruClient",
+    "MineruWorker",
     "MinioSourceReader",
     "S3SourceReader",
     "SourceReaderRegistry",

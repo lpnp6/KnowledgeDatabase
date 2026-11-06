@@ -140,7 +140,12 @@ def assemble_content(paragraphs: list[str]) -> list[str]:
         if i == 0:
             result.append(c)
         else:
-            result.append(_overlap_tail(merged[i - 1], OVERLAP_RATIO) + c)
+            tail = _overlap_tail(merged[i - 1], OVERLAP_RATIO)
+            # 拼接处补空格，避免 overlap 尾部与下一 chunk 首词黏连（"leveraginglarger"）
+            if tail and c and not tail[-1].isspace() and not c[0].isspace():
+                result.append(tail + " " + c)
+            else:
+                result.append(tail + c)
     return result
 
 
@@ -178,12 +183,26 @@ def _html_to_text(fragment: str) -> str:
     return fragment.strip()
 
 
-def _clean_inline(text: str) -> str:
-    """Strip inline HTML (e.g. <sup>1</sup>) from a block's text content."""
+def _clean_latex(text: str) -> str:
+    """Reduce LaTeX math markup to readable text (drop commands, braces, `$`)."""
     if not text:
         return ""
+    text = text.replace("$", "")
+    text = re.sub(r"\\[a-zA-Z]+", "", text)   # \sum, \mathrm, \mathcal, …
+    text = text.replace("\\", "")             # leftover backslashes (\{, \}, etc.)
+    text = re.sub(r"[{}]", "", text)          # braces
+    text = re.sub(r"[ \t]+", " ", text)       # collapse runs of spaces/tabs
+    return text.strip()
+
+
+def _clean_inline(text: str) -> str:
+    """Strip inline HTML (e.g. <sup>1</sup>) and LaTeX markup from block text."""
+    if not text:
+        return ""
+    text = re.sub(r"(?is)<sup[^>]*>.*?</sup>", "", text)  # drop reference-number superscripts
     text = re.sub(r"(?is)<[^>]+>", "", text)
-    return _html.unescape(text).strip()
+    text = _html.unescape(text)
+    return _clean_latex(text)
 
 
 def chunk_content_list(content_list: list[dict], doc_id: str) -> list[Chunk]:
