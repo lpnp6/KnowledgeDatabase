@@ -27,13 +27,21 @@ class MineruClient(DocumentExtractor):
         base_url: str = "http://localhost:8000",
         timeout: float = 3600.0,
         parse_path: str = _PARSE_PATH,
+        max_connections: int = 10,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._parse_path = parse_path
         # One shared Client: thread-safe, reuses the connection pool across
-        # concurrent requests (the worker fans out many calls over this client).
-        self._client = httpx.Client(timeout=timeout)
+        # concurrent requests. `max_connections` should be >= the worker's
+        # concurrency so each in-flight request gets its own pooled connection.
+        self._client = httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_connections,
+            ),
+        )
 
     def extract(self, pdf_bytes: bytes) -> list[dict]:
         url = f"{self._base_url}{self._parse_path}"

@@ -23,7 +23,10 @@ class MineruWorker:
         timeout: float = 3600.0,
     ) -> None:
         self._max_concurrency = max_concurrency
-        self._client = MineruClient(base_url=base_url, timeout=timeout)
+        # Connection pool sized to the concurrency: one pooled connection per lane.
+        self._client = MineruClient(
+            base_url=base_url, timeout=timeout, max_connections=max_concurrency
+        )
         self._pool = ThreadPoolExecutor(max_workers=max_concurrency)
 
     @property
